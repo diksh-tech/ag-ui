@@ -1463,4 +1463,39 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+#####################################################################
+PS C:\Users\Deeksha.x.Srivastava\OneDrive - InterGlobe Aviation Limited\Desktop\agui\backend> python .\test_client.py      
+🔬 FLIGHTOPS SYSTEM TEST SUITE
+==================================================
+🏥 Health Check: 200
+{
+  "status": "healthy",
+  "mcp_connected": true,
+  "tools_available": 9,
+  "ag_ui_available": true
+}
+🔧 Tools Check: 200
+✅ Available tools: 9
+   - health_check
+   - get_flight_basic_info
+   - get_operation_times
+   - get_equipment_info
+   - get_delay_summary
+   - get_fuel_summary
+   - get_passenger_info
+   - get_crew_info
+   - raw_mongodb_query
+
+🔍 Testing: health check
+📊 Response: 200
+❌ Direct query failed: slice(None, 100, None)
+
+🎯 Testing AG-UI Agent...
+🔗 Status: 200
+🚀 Run started...
+
+❌ Error: 'dict' object has no attribute 'split'
+
+🎉 TESTING COMPLETE!
+PS C:\Users\Deeksha.x.Srivastava\OneDrive - InterGlobe Aviation Limited\Desktop\agui\backend> 
 
