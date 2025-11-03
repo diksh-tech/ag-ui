@@ -10,3 +10,70 @@ INFO:     127.0.0.1:61360 - "POST /agent HTTP/1.1" 422 Unprocessable Content
 PS C:\Users\Deeksha.x.Srivastava\OneDrive - InterGlobe Aviation Limited\Desktop\agui> python ag_ui_client.py
 🔄 Connecting to AG-UI server...
 ✅ Connected. Status: 422
+##################################################################################ERROR2
+(venv66) PS C:\Users\Deeksha.x.Srivastava\OneDrive - InterGlobe Aviation Limited\Desktop\agui\backend> python server.py
+INFO:flightops.mcp.server:Starting FlightOps MCP Server on 127.0.0.1:8000 (transport=streamable-http)
+INFO:flightops.mcp.server:MongoDB URL: mongodb+srv://joc-dbuser:n5cqzIJSl319TZN6@mongo-airlineops-az-ddb01-pl-0.npznw.mongodb.net/, Database: jocflightdb_30jan, Collection: flight
+INFO:     Started server process [4776]
+INFO:     Waiting for application startup.
+INFO:mcp.server.streamable_http_manager:StreamableHTTP session manager started
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://127.0.0.1:8000 (Press CTRL+C to quit)
+INFO:     127.0.0.1:58359 - "GET / HTTP/1.1" 404 Not Found
+INFO:     127.0.0.1:63355 - "GET / HTTP/1.1" 404 Not Found
+INFO:     127.0.0.1:59825 - "GET /docs HTTP/1.1" 404 Not Found
+####################################################################################
+(venv66) PS C:\Users\Deeksha.x.Srivastava\OneDrive - InterGlobe Aviation Limited\Desktop\agui\backend> python ag_ui_server_integrated.py
+INFO:     Started server process [22192]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://0.0.0.0:8001 (Press CTRL+C to quit)
+INFO:     127.0.0.1:63364 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63366 - "GET /tools HTTP/1.1" 404 Not Found
+INFO:     127.0.0.1:63369 - "POST /direct-query HTTP/1.1" 404 Not Found
+📥 Received request with 1 messages
+INFO:     127.0.0.1:63399 - "POST /agent HTTP/1.1" 200 OK
+##################################################################
+PS C:\Users\Deeksha.x.Srivastava\OneDrive - InterGlobe Aviation Limited\Desktop\agui\backend> python validate_integration.py
+🔍 Validating FlightOps Integration
+==================================================
+
+1. Checking MCP Server (port 8000)...
+   ✅ MCP Server should be running on port 8000
+
+2. Checking AG-UI Server (port 8001)...
+   ✅ AG-UI Server healthy: {'status': 'healthy', 'service': 'FlightOps AG-UI Server', 'openai_configured': True}
+
+3. Checking MCP Tools Integration...
+   ❌ Tools endpoint failed: 404
+
+4. Testing Direct MCP Query...
+   ❌ Direct query failed: 404
+
+==================================================
+🎯 Validation Complete!
+Next: Run 'python ag_ui_client_enhanced.py' to test flight data queries
+###############################################################################
+(venv66) PS C:\Users\Deeksha.x.Srivastava\OneDrive - InterGlobe Aviation Limited\Desktop\agui\backend> python .\ag_ui_client_enhanced.py  
+🔄 Connecting to AG-UI server...
+📤 Sending request: {
+  "thread_id": "main-thread",
+  "run_id": "run-1762165290",
+  "messages": [
+    {
+      "id": "msg-1",
+      "role": "user",
+      "content": "What's the status of flight 6E 215 on 2024-06-23?"
+    }
+  ],
+  "tools": []
+}
+✅ Connected. Status: 200
+🎯 Starting to receive events...
+
+🚀 Agent started...
+
+💬 Assistant: I'm unable to provide real-time or future flight status updates. For the latest and most accurate information regarding flight 6E 215 on June 23, 2024, I recommend checking with IndiGo Airlines directly through their website, mobile app, or customer service closer to the departure date. 
+
+✅ Agent finished successfully!
+
