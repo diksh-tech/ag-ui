@@ -2,6 +2,7 @@
 import os
 import uuid
 import json
+import asyncio
 from typing import AsyncGenerator, Dict, Any
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import StreamingResponse
@@ -22,11 +23,17 @@ app.add_middleware(
 )
 
 # Azure OpenAI client
-client = AzureOpenAI(
-    api_key=os.getenv("AZURE_OPENAI_KEY"),
-    api_version=os.getenv("AZURE_API_VERSION", "2024-12-01-preview"),
-    azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT")
-)
+try:
+    client = AzureOpenAI(
+        api_key=os.getenv("AZURE_OPENAI_KEY"),
+        api_version=os.getenv("AZURE_API_VERSION", "2024-12-01-preview"),
+        azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT")
+    )
+    OPENAI_AVAILABLE = True
+except Exception as e:
+    print(f"⚠️ Azure OpenAI not configured: {e}")
+    OPENAI_AVAILABLE = False
+    client = None
 
 @app.post("/agent")
 async def flight_agent_endpoint(request: Request):
@@ -35,7 +42,7 @@ async def flight_agent_endpoint(request: Request):
     try:
         # Parse the request body
         body = await request.json()
-        print(f"📥 Received request: {json.dumps(body, indent=2)}")
+        print(f"📥 Received request with {len(body.get('messages', []))} messages")
         
         # Extract messages from the request
         messages = body.get("messages", [])
@@ -64,24 +71,31 @@ async def flight_agent_endpoint(request: Request):
                 message_id = f"msg-{uuid.uuid4().hex[:8]}"
                 yield f"data: {json.dumps({'type': 'TEXT_MESSAGE_START', 'message_id': message_id, 'role': 'assistant'})}\n\n"
 
-                # Call Azure OpenAI (non-streaming for simplicity)
-                completion = client.chat.completions.create(
-                    model=os.getenv("AZURE_OPENAI_DEPLOYMENT", "gpt-4o"),
-                    messages=[
-                        {"role": "system", "content": "You are a helpful flight operations assistant."},
-                        {"role": "user", "content": user_message}
-                    ],
-                    max_tokens=500
-                )
-
-                response_text = completion.choices[0].message.content
+                if not OPENAI_AVAILABLE or not client:
+                    # Fallback response if OpenAI isn't configured
+                    response_text = "I'm your FlightOps assistant. Currently, Azure OpenAI is not configured. Please check your environment variables."
+                else:
+                    # Call Azure OpenAI
+                    completion = client.chat.completions.create(
+                        model=os.getenv("AZURE_OPENAI_DEPLOYMENT", "gpt-4o"),
+                        messages=[
+                            {"role": "system", "content": "You are a helpful flight operations assistant for an airline. Provide concise, helpful responses about flight status, equipment, delays, and other flight operations information."},
+                            {"role": "user", "content": user_message}
+                        ],
+                        max_tokens=500
+                    )
+                    response_text = completion.choices[0].message.content
                 
-                # Stream response in chunks to simulate real streaming
+                # Stream response in chunks
                 words = response_text.split()
-                for i, word in enumerate(words):
-                    yield f"data: {json.dumps({'type': 'TEXT_MESSAGE_CONTENT', 'message_id': message_id, 'delta': word + ' '})}\n\n"
-                    # Small delay to simulate streaming
-                    # await asyncio.sleep(0.05)
+                for word in words:
+                    event_data = {
+                        'type': 'TEXT_MESSAGE_CONTENT', 
+                        'message_id': message_id, 
+                        'delta': word + ' '
+                    }
+                    yield f"data: {json.dumps(event_data)}\n\n"
+                    await asyncio.sleep(0.05)  # Small delay for streaming effect
 
                 # Emit TEXT_MESSAGE_END
                 yield f"data: {json.dumps({'type': 'TEXT_MESSAGE_END', 'message_id': message_id})}\n\n"
@@ -99,6 +113,8 @@ async def flight_agent_endpoint(request: Request):
             headers={
                 "Cache-Control": "no-cache",
                 "Connection": "keep-alive",
+                "Access-Control-Allow-Origin": "*",
+                "Access-Control-Allow-Headers": "*",
             }
         )
 
@@ -108,11 +124,20 @@ async def flight_agent_endpoint(request: Request):
 
 @app.get("/")
 async def health_check():
-    return {"status": "healthy", "service": "FlightOps AG-UI Server"}
+    return {
+        "status": "healthy", 
+        "service": "FlightOps AG-UI Server",
+        "openai_configured": OPENAI_AVAILABLE
+    }
 
+@app.get("/test")
+async def test_endpoint():
+    return {"message": "Server is working!"}
+
+# Use this for direct execution without reload
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8001, reload=True)
+    uvicorn.run(app, host="0.0.0.0", port=8001)
 ###############################################################################
 # ag_ui_client.py
 import asyncio
