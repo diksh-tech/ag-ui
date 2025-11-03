@@ -1,0 +1,1830 @@
+import os
+import json
+import asyncio
+from datetime import datetime, timedelta
+from bson import ObjectId
+from typing import Dict, Any, List, Optional
+
+from mcp.server import Server
+from mcp.server.models import InitializationOptions
+import mcp.server.stdio
+import mcp.types as types
+from pymongo import MongoClient
+from pymongo.errors import ConnectionFailure
+import logging
+
+from tool_registry import TOOLS
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("FlightOpsServer")
+
+# MongoDB connection
+MONGO_URI = os.getenv("MONGO_URI", "mongodb://localhost:27017/")
+MONGO_DB = os.getenv("MONGO_DB", "flightops")
+MONGO_COLLECTION = os.getenv("MONGO_COLLECTION", "flightLegs")
+
+class FlightOpsServer:
+    def __init__(self):
+        self.server = Server("flightops-server")
+        self.setup_handlers()
+        self.mongo_client = None
+        self.db = None
+        self.collection = None
+        
+    def connect_mongodb(self):
+        """Connect to MongoDB with error handling"""
+        try:
+            self.mongo_client = MongoClient(MONGO_URI)
+            self.db = self.mongo_client[MONGO_DB]
+            self.collection = self.db[MONGO_COLLECTION]
+            # Test connection
+            self.mongo_client.admin.command('ping')
+            logger.info("✅ Connected to MongoDB successfully")
+            return True
+        except ConnectionFailure as e:
+            logger.error(f"❌ MongoDB connection failed: {e}")
+            return False
+
+    def setup_handlers(self):
+        """Setup MCP tool handlers"""
+        
+        @self.server.list_tools()
+        async def handle_list_tools() -> list[types.Tool]:
+            """List all available tools"""
+            tools = []
+            for name, tool_def in TOOLS.items():
+                tools.append(types.Tool(
+                    name=name,
+                    description=tool_def["description"],
+                    inputSchema=tool_def["parameters"]
+                ))
+            return tools
+
+        @self.server.call_tool()
+        async def handle_call_tool(
+            name: str, arguments: dict
+        ) -> list[types.TextContent]:
+            """Handle tool execution"""
+            try:
+                if not self.mongo_client:
+                    if not self.connect_mongodb():
+                        return [types.TextContent(
+                            type="text", 
+                            text="Error: Could not connect to MongoDB"
+                        )]
+
+                logger.info(f"🛠️ Executing tool: {name} with args: {arguments}")
+                
+                # Route to appropriate handler
+                if name == "get_flight_basic_info":
+                    result = await self.get_flight_basic_info(arguments)
+                elif name == "get_equipment_info":
+                    result = await self.get_equipment_info(arguments)
+                elif name == "get_operation_times":
+                    result = await self.get_operation_times(arguments)
+                elif name == "get_fuel_summary":
+                    result = await self.get_fuel_summary(arguments)
+                elif name == "get_delay_summary":
+                    result = await self.get_delay_summary(arguments)
+                elif name == "get_passenger_info":
+                    result = await self.get_passenger_info(arguments)
+                elif name == "get_crew_info":
+                    result = await self.get_crew_info(arguments)
+                elif name == "search_flights_by_route":
+                    result = await self.search_flights_by_route(arguments)
+                elif name == "health_check":
+                    result = await self.health_check()
+                elif name == "raw_mongodb_query":
+                    result = await self.raw_mongodb_query(arguments)
+                elif name == "run_aggregated_query":
+                    result = await self.run_aggregated_query(arguments)
+                else:
+                    result = {"error": f"Unknown tool: {name}"}
+                
+                return [types.TextContent(type="text", text=json.dumps(result, default=str))]
+                
+            except Exception as e:
+                logger.error(f"❌ Tool execution error: {e}")
+                return [types.TextContent(type="text", text=json.dumps({"error": str(e)}))]
+
+    # Tool implementations
+    async def get_flight_basic_info(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Get basic flight information"""
+        query = {}
+        if args.get("carrier"):
+            query["flightLegState.carrier"] = args["carrier"]
+        if args.get("flight_number"):
+            query["flightLegState.flightNumber"] = args["flight_number"]
+        if args.get("date_of_origin"):
+            query["flightLegState.dateOfOrigin"] = args["date_of_origin"]
+        
+        projection = {
+            "flightLegState.carrier": 1,
+            "flightLegState.flightNumber": 1,
+            "flightLegState.startStation": 1,
+            "flightLegState.endStation": 1,
+            "flightLegState.scheduledStartTime": 1,
+            "flightLegState.scheduledEndTime": 1,
+            "flightLegState.flightStatus": 1,
+            "flightLegState.operationalStatus": 1,
+            "_id": 0
+        }
+        
+        results = list(self.collection.find(query, projection).limit(10))
+        return {"flights": results, "count": len(results)}
+
+    async def get_equipment_info(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Get aircraft equipment information"""
+        query = {}
+        if args.get("carrier"):
+            query["flightLegState.carrier"] = args["carrier"]
+        if args.get("flight_number"):
+            query["flightLegState.flightNumber"] = args["flight_number"]
+        if args.get("date_of_origin"):
+            query["flightLegState.dateOfOrigin"] = args["date_of_origin"]
+        
+        projection = {
+            "flightLegState.carrier": 1,
+            "flightLegState.flightNumber": 1,
+            "flightLegState.equipment.aircraftRegistration": 1,
+            "flightLegState.equipment.assignedAircraftTypeIATA": 1,
+            "flightLegState.equipment.assignedAircraftTypeICAO": 1,
+            "flightLegState.equipment.assignedAircraftVersion": 1,
+            "_id": 0
+        }
+        
+        results = list(self.collection.find(query, projection).limit(10))
+        return {"equipment": results, "count": len(results)}
+
+    async def get_operation_times(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Get operation timing information"""
+        query = {}
+        if args.get("carrier"):
+            query["flightLegState.carrier"] = args["carrier"]
+        if args.get("flight_number"):
+            query["flightLegState.flightNumber"] = args["flight_number"]
+        if args.get("date_of_origin"):
+            query["flightLegState.dateOfOrigin"] = args["date_of_origin"]
+        
+        projection = {
+            "flightLegState.carrier": 1,
+            "flightLegState.flightNumber": 1,
+            "flightLegState.scheduledStartTime": 1,
+            "flightLegState.scheduledEndTime": 1,
+            "flightLegState.operation.actualTimes.actualDepartureTime": 1,
+            "flightLegState.operation.actualTimes.actualArrivalTime": 1,
+            "flightLegState.operation.actualTimes.actualBlockTime": 1,
+            "_id": 0
+        }
+        
+        results = list(self.collection.find(query, projection).limit(10))
+        return {"operation_times": results, "count": len(results)}
+
+    async def get_fuel_summary(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Get fuel summary information"""
+        query = {}
+        if args.get("carrier"):
+            query["flightLegState.carrier"] = args["carrier"]
+        if args.get("flight_number"):
+            query["flightLegState.flightNumber"] = args["flight_number"]
+        if args.get("date_of_origin"):
+            query["flightLegState.dateOfOrigin"] = args["date_of_origin"]
+        
+        projection = {
+            "flightLegState.carrier": 1,
+            "flightLegState.flightNumber": 1,
+            "flightLegState.operation.fuel.plannedFuel": 1,
+            "flightLegState.operation.fuel.actualFuel": 1,
+            "flightLegState.operation.fuel.fuelUplift": 1,
+            "_id": 0
+        }
+        
+        results = list(self.collection.find(query, projection).limit(10))
+        return {"fuel_summary": results, "count": len(results)}
+
+    async def get_delay_summary(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Get delay information"""
+        query = {}
+        if args.get("carrier"):
+            query["flightLegState.carrier"] = args["carrier"]
+        if args.get("flight_number"):
+            query["flightLegState.flightNumber"] = args["flight_number"]
+        if args.get("date_of_origin"):
+            query["flightLegState.dateOfOrigin"] = args["date_of_origin"]
+        
+        projection = {
+            "flightLegState.carrier": 1,
+            "flightLegState.flightNumber": 1,
+            "flightLegState.delays.total": 1,
+            "flightLegState.delays.reasons": 1,
+            "_id": 0
+        }
+        
+        results = list(self.collection.find(query, projection).limit(10))
+        return {"delays": results, "count": len(results)}
+
+    async def get_passenger_info(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Get passenger information"""
+        query = {}
+        if args.get("carrier"):
+            query["flightLegState.carrier"] = args["carrier"]
+        if args.get("flight_number"):
+            query["flightLegState.flightNumber"] = args["flight_number"]
+        if args.get("date_of_origin"):
+            query["flightLegState.dateOfOrigin"] = args["date_of_origin"]
+        
+        projection = {
+            "flightLegState.carrier": 1,
+            "flightLegState.flightNumber": 1,
+            "flightLegState.pax.passengerCount.count": 1,
+            "flightLegState.pax.connectionCount.count": 1,
+            "_id": 0
+        }
+        
+        results = list(self.collection.find(query, projection).limit(10))
+        return {"passengers": results, "count": len(results)}
+
+    async def get_crew_info(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Get crew information"""
+        query = {}
+        if args.get("carrier"):
+            query["flightLegState.carrier"] = args["carrier"]
+        if args.get("flight_number"):
+            query["flightLegState.flightNumber"] = args["flight_number"]
+        if args.get("date_of_origin"):
+            query["flightLegState.dateOfOrigin"] = args["date_of_origin"]
+        
+        projection = {
+            "flightLegState.carrier": 1,
+            "flightLegState.flightNumber": 1,
+            "flightLegState.crew.crewCount": 1,
+            "flightLegState.crew.crewConnections": 1,
+            "_id": 0
+        }
+        
+        results = list(self.collection.find(query, projection).limit(10))
+        return {"crew": results, "count": len(results)}
+
+    async def search_flights_by_route(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Search flights by route"""
+        query = {}
+        if args.get("departure_station"):
+            query["flightLegState.startStation"] = args["departure_station"]
+        if args.get("arrival_station"):
+            query["flightLegState.endStation"] = args["arrival_station"]
+        if args.get("carrier"):
+            query["flightLegState.carrier"] = args["carrier"]
+        if args.get("start_date"):
+            query["flightLegState.dateOfOrigin"] = {"$gte": args["start_date"]}
+        if args.get("end_date"):
+            if "dateOfOrigin" in query:
+                query["flightLegState.dateOfOrigin"]["$lte"] = args["end_date"]
+            else:
+                query["flightLegState.dateOfOrigin"] = {"$lte": args["end_date"]}
+        
+        limit = args.get("limit", 20)
+        
+        projection = {
+            "flightLegState.carrier": 1,
+            "flightLegState.flightNumber": 1,
+            "flightLegState.startStation": 1,
+            "flightLegState.endStation": 1,
+            "flightLegState.scheduledStartTime": 1,
+            "flightLegState.scheduledEndTime": 1,
+            "flightLegState.flightStatus": 1,
+            "_id": 0
+        }
+        
+        results = list(self.collection.find(query, projection).limit(limit))
+        return {"flights": results, "count": len(results)}
+
+    async def health_check(self) -> Dict[str, Any]:
+        """Health check for the server and database"""
+        db_status = "connected" if self.mongo_client and self.mongo_client.admin.command('ping') else "disconnected"
+        return {
+            "status": "healthy",
+            "database": db_status,
+            "timestamp": datetime.now().isoformat(),
+            "tools_available": len(TOOLS)
+        }
+
+    async def raw_mongodb_query(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Execute raw MongoDB query"""
+        try:
+            query_json = args.get("query_json", "{}")
+            projection_json = args.get("projection", "{}")
+            limit = args.get("limit", 10)
+            
+            query = json.loads(query_json)
+            projection = json.loads(projection_json) if projection_json else {}
+            
+            results = list(self.collection.find(query, projection).limit(limit))
+            return {"results": results, "count": len(results)}
+        except Exception as e:
+            return {"error": f"Query execution failed: {str(e)}"}
+
+    async def run_aggregated_query(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Run aggregation queries"""
+        try:
+            query_type = args.get("query_type")
+            field = args.get("field")
+            carrier = args.get("carrier")
+            start_date = args.get("start_date")
+            end_date = args.get("end_date")
+            
+            pipeline = []
+            
+            # Match stage
+            match_stage = {}
+            if carrier:
+                match_stage["flightLegState.carrier"] = carrier
+            if start_date and end_date:
+                match_stage["flightLegState.dateOfOrigin"] = {
+                    "$gte": start_date,
+                    "$lte": end_date
+                }
+            elif start_date:
+                match_stage["flightLegState.dateOfOrigin"] = {"$gte": start_date}
+            elif end_date:
+                match_stage["flightLegState.dateOfOrigin"] = {"$lte": end_date}
+                
+            if match_stage:
+                pipeline.append({"$match": match_stage})
+            
+            # Group stage based on query type
+            if query_type == "count":
+                pipeline.append({"$group": {"_id": None, "count": {"$sum": 1}}})
+            elif query_type == "average" and field:
+                pipeline.append({"$group": {"_id": None, "average": {"$avg": f"${field}"}}})
+            elif query_type == "sum" and field:
+                pipeline.append({"$group": {"_id": None, "sum": {"$sum": f"${field}"}}})
+            elif query_type == "min" and field:
+                pipeline.append({"$group": {"_id": None, "min": {"$min": f"${field}"}}})
+            elif query_type == "max" and field:
+                pipeline.append({"$group": {"_id": None, "max": {"$max": f"${field}"}}})
+            else:
+                return {"error": f"Unsupported query type: {query_type} or missing field"}
+            
+            results = list(self.collection.aggregate(pipeline))
+            return {"aggregation": results, "query_type": query_type}
+            
+        except Exception as e:
+            return {"error": f"Aggregation failed: {str(e)}"}
+
+    async def run(self):
+        """Run the server"""
+        # Connect to MongoDB
+        if not self.connect_mongodb():
+            logger.error("❌ Failed to connect to MongoDB. Exiting.")
+            return
+        
+        # Run MCP server
+        async with mcp.server.stdio.stdio_server() as (read_stream, write_stream):
+            await self.server.run(
+                read_stream,
+                write_stream,
+                InitializationOptions(
+                    server_name="flightops-server",
+                    server_version="1.0.0",
+                    capabilities=self.server.get_capabilities(
+                        notification_options=None,
+                        experimental_capabilities=None,
+                    )
+                ),
+            )
+
+async def main():
+    server = FlightOpsServer()
+    await server.run()
+
+if __name__ == "__main__":
+    asyncio.run(main())
+#######################################################################
+TOOLS = {
+    "get_flight_basic_info": {
+        "name": "get_flight_basic_info",
+        "description": "Fetch basic flight information including carrier, flight number, stations, scheduled times, and flight status.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "carrier": {
+                    "type": "string",
+                    "description": "Airline carrier code (e.g., '6E', 'AI')"
+                },
+                "flight_number": {
+                    "type": "string",
+                    "description": "Flight number as string (e.g., '215')"
+                },
+                "date_of_origin": {
+                    "type": "string",
+                    "description": "Date in YYYY-MM-DD format (e.g., '2024-06-23')"
+                }
+            },
+            "required": []
+        }
+    },
+    "get_equipment_info": {
+        "name": "get_equipment_info",
+        "description": "Get aircraft equipment details: aircraft type, tail number (registration), and configuration.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "carrier": {
+                    "type": "string",
+                    "description": "Airline carrier code"
+                },
+                "flight_number": {
+                    "type": "string",
+                    "description": "Flight number as string"
+                },
+                "date_of_origin": {
+                    "type": "string",
+                    "description": "Date in YYYY-MM-DD format"
+                }
+            },
+            "required": []
+        }
+    },
+    "get_operation_times": {
+        "name": "get_operation_times",
+        "description": "Return estimated and actual operation times: takeoff, landing, departure, arrival, and block times.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "carrier": {
+                    "type": "string",
+                    "description": "Airline carrier code"
+                },
+                "flight_number": {
+                    "type": "string",
+                    "description": "Flight number as string"
+                },
+                "date_of_origin": {
+                    "type": "string",
+                    "description": "Date in YYYY-MM-DD format"
+                }
+            },
+            "required": []
+        }
+    },
+    "get_fuel_summary": {
+        "name": "get_fuel_summary",
+        "description": "Retrieve fuel summary including planned vs actual fuel consumption for the flight.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "carrier": {
+                    "type": "string",
+                    "description": "Airline carrier code"
+                },
+                "flight_number": {
+                    "type": "string",
+                    "description": "Flight number as string"
+                },
+                "date_of_origin": {
+                    "type": "string",
+                    "description": "Date in YYYY-MM-DD format"
+                }
+            },
+            "required": []
+        }
+    },
+    "get_delay_summary": {
+        "name": "get_delay_summary",
+        "description": "Get delay information including delay reasons, durations, and total delay time.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "carrier": {
+                    "type": "string",
+                    "description": "Airline carrier code"
+                },
+                "flight_number": {
+                    "type": "string",
+                    "description": "Flight number as string"
+                },
+                "date_of_origin": {
+                    "type": "string",
+                    "description": "Date in YYYY-MM-DD format"
+                }
+            },
+            "required": []
+        }
+    },
+    "get_passenger_info": {
+        "name": "get_passenger_info",
+        "description": "Get passenger count and connection information for the flight.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "carrier": {
+                    "type": "string",
+                    "description": "Airline carrier code"
+                },
+                "flight_number": {
+                    "type": "string",
+                    "description": "Flight number as string"
+                },
+                "date_of_origin": {
+                    "type": "string",
+                    "description": "Date in YYYY-MM-DD format"
+                }
+            },
+            "required": []
+        }
+    },
+    "get_crew_info": {
+        "name": "get_crew_info",
+        "description": "Get crew connections and details for the flight.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "carrier": {
+                    "type": "string",
+                    "description": "Airline carrier code"
+                },
+                "flight_number": {
+                    "type": "string",
+                    "description": "Flight number as string"
+                },
+                "date_of_origin": {
+                    "type": "string",
+                    "description": "Date in YYYY-MM-DD format"
+                }
+            },
+            "required": []
+        }
+    },
+    "search_flights_by_route": {
+        "name": "search_flights_by_route",
+        "description": "Search for flights between specific airports or stations with optional date range and carrier filters.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "departure_station": {
+                    "type": "string",
+                    "description": "Departure airport code (e.g., 'DEL', 'BOM')"
+                },
+                "arrival_station": {
+                    "type": "string",
+                    "description": "Arrival airport code (e.g., 'BLR', 'MAA')"
+                },
+                "carrier": {
+                    "type": "string",
+                    "description": "Optional carrier filter"
+                },
+                "start_date": {
+                    "type": "string",
+                    "description": "Start date (YYYY-MM-DD)"
+                },
+                "end_date": {
+                    "type": "string",
+                    "description": "End date (YYYY-MM-DD)"
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Maximum results (default: 20)",
+                    "default": 20
+                }
+            },
+            "required": ["departure_station", "arrival_station"]
+        }
+    },
+    "health_check": {
+        "name": "health_check",
+        "description": "Check the health status of the MCP server and database connection.",
+        "parameters": {
+            "type": "object",
+            "properties": {},
+            "required": []
+        }
+    },
+    "raw_mongodb_query": {
+        "name": "raw_mongodb_query",
+        "description": "Run a raw MongoDB query (JSON format) with optional projection for advanced filtering.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query_json": {
+                    "type": "string",
+                    "description": "MongoDB query as JSON string (e.g., '{\"flightLegState.carrier\": \"6E\"}')"
+                },
+                "projection": {
+                    "type": "string",
+                    "description": "Optional projection as JSON string to select specific fields"
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Maximum number of documents to return (default 10, max 50)",
+                    "default": 10
+                }
+            },
+            "required": ["query_json"]
+        }
+    },
+    "run_aggregated_query": {
+        "name": "run_aggregated_query",
+        "description": "Run MongoDB aggregation queries (average, sum, min, max, count) with optional carrier or date filters.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query_type": {
+                    "type": "string",
+                    "enum": ["average", "sum", "min", "max", "count"],
+                    "description": "Type of aggregation to perform"
+                },
+                "carrier": {
+                    "type": "string",
+                    "description": "Optional carrier filter"
+                },
+                "field": {
+                    "type": "string",
+                    "description": "Field to aggregate (e.g., 'flightLegState.pax.passengerCount.count')"
+                },
+                "start_date": {
+                    "type": "string",
+                    "description": "Optional start date (YYYY-MM-DD)"
+                },
+                "end_date": {
+                    "type": "string",
+                    "description": "Optional end date (YYYY-MM-DD)"
+                },
+                "filter_json": {
+                    "type": "string",
+                    "description": "Optional additional filter as JSON string"
+                }
+            },
+            "required": ["query_type"]
+        }
+    }
+}
+#######################################################################
+import os
+import uuid
+import json
+import asyncio
+import logging
+from typing import AsyncGenerator, Dict, Any
+from fastapi import FastAPI, Request, HTTPException
+from fastapi.responses import StreamingResponse
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from dotenv import load_dotenv
+
+load_dotenv()
+
+# Configure logging
+logging.basicConfig(
+    level=os.getenv("LOG_LEVEL", "INFO"),
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger("FlightOps.AGUIServer")
+
+app = FastAPI(
+    title="FlightOps AG-UI Server",
+    description="AG-UI Protocol Server for IndiGo FlightOps Chatbot",
+    version="1.0.0"
+)
+
+# CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# AG-UI imports
+try:
+    from ag_ui.core import (
+        RunAgentInput, EventType, RunStartedEvent, RunFinishedEvent, 
+        RunErrorEvent, TextMessageStartEvent, TextMessageContentEvent, 
+        TextMessageEndEvent
+    )
+    from ag_ui.encoder import EventEncoder
+    AGUI_AVAILABLE = True
+    logger.info("✅ AG-UI protocol enabled")
+except ImportError as e:
+    AGUI_AVAILABLE = False
+    logger.warning(f"⚠️ AG-UI not available: {e}")
+
+# Import MCP client
+try:
+    from mcp_client import FlightOpsMCPClient
+    from tool_registry import get_tool_definitions
+    MCP_AVAILABLE = True
+except ImportError as e:
+    MCP_AVAILABLE = False
+    logger.error(f"❌ MCP client not available: {e}")
+
+class FlightOpsAGUIAgent:
+    def __init__(self):
+        self.mcp_client = FlightOpsMCPClient()
+        self.connected = False
+        self.tools = get_tool_definitions() if MCP_AVAILABLE else []
+
+    async def ensure_connected(self):
+        """Ensure MCP client is connected"""
+        if not self.connected and MCP_AVAILABLE:
+            try:
+                await self.mcp_client.connect()
+                self.connected = True
+                logger.info("✅ MCP client connected successfully")
+            except Exception as e:
+                logger.error(f"❌ Failed to connect MCP client: {e}")
+                raise
+
+    async def process_query(self, user_message: str) -> Dict[str, Any]:
+        """Process user query with comprehensive error handling"""
+        try:
+            if not MCP_AVAILABLE:
+                return {
+                    "error": "MCP client not available",
+                    "summary": {"summary": "Backend services are currently unavailable. Please try again later."}
+                }
+            
+            await self.ensure_connected()
+            logger.info(f"🔍 Processing query: {user_message}")
+            
+            result = await self.mcp_client.run_query(user_message)
+            logger.info("✅ Query processed successfully")
+            return result
+            
+        except Exception as e:
+            logger.error(f"❌ Query processing failed: {e}")
+            return {
+                "error": str(e),
+                "summary": {"summary": f"Sorry, I encountered an error while processing your request: {str(e)}"}
+            }
+
+# Global agent instance
+agent = FlightOpsAGUIAgent()
+
+@app.on_event("startup")
+async def startup_event():
+    """Initialize agent on startup"""
+    logger.info("🚀 Starting FlightOps AG-UI Server...")
+    if MCP_AVAILABLE:
+        try:
+            await agent.ensure_connected()
+            logger.info("✅ FlightOps AG-UI Server started successfully")
+        except Exception as e:
+            logger.error(f"❌ Startup failed: {e}")
+    else:
+        logger.warning("⚠️ Starting without MCP client")
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    """Cleanup on shutdown"""
+    logger.info("🛑 Shutting down FlightOps AG-UI Server...")
+    if MCP_AVAILABLE and agent.connected:
+        try:
+            await agent.mcp_client.disconnect()
+            logger.info("✅ Clean shutdown completed")
+        except Exception as e:
+            logger.error(f"❌ Shutdown error: {e}")
+
+@app.post("/agent")
+async def agent_endpoint(request: Request):
+    """Main AG-UI agent endpoint"""
+    if not AGUI_AVAILABLE:
+        raise HTTPException(status_code=500, detail="AG-UI protocol not available")
+
+    try:
+        # Parse and validate request
+        body = await request.json()
+        logger.debug(f"📥 Received request")
+
+        # Validate AG-UI input format
+        if "messages" not in body:
+            raise HTTPException(status_code=400, detail="Missing 'messages' in request body")
+
+        # Extract user message
+        messages = body.get("messages", [])
+        user_message = None
+        
+        for msg in messages:
+            if msg.get("role") == "user":
+                user_message = msg.get("content", "").strip()
+                break
+        
+        if not user_message:
+            raise HTTPException(status_code=400, detail="No user message found")
+
+        # Get thread and run IDs
+        thread_id = body.get("thread_id", f"thread-{uuid.uuid4().hex[:8]}")
+        run_id = body.get("run_id", f"run-{uuid.uuid4().hex[:8]}")
+
+        logger.info(f"🎯 Processing request - Thread: {thread_id}, Run: {run_id}")
+        logger.info(f"💬 User message: {user_message}")
+
+        # Setup encoder
+        accept_header = request.headers.get("accept", "text/event-stream")
+        encoder = EventEncoder(accept=accept_header)
+
+        async def generate_events() -> AsyncGenerator[str, None]:
+            """Generate AG-UI events with proper streaming"""
+            try:
+                # Emit run started event
+                yield encoder.encode(RunStartedEvent(
+                    type=EventType.RUN_STARTED,
+                    thread_id=thread_id,
+                    run_id=run_id
+                ))
+
+                # Process the query
+                result = await agent.process_query(user_message)
+                
+                # Handle errors in result
+                if "error" in result:
+                    yield encoder.encode(RunErrorEvent(
+                        type=EventType.RUN_ERROR,
+                        message=result["error"]
+                    ))
+                    return
+
+                # Extract response text
+                response_text = ""
+                if isinstance(result, dict):
+                    if "summary" in result:
+                        if isinstance(result["summary"], dict):
+                            response_text = result["summary"].get("summary", "No summary available")
+                        else:
+                            response_text = result["summary"]
+                    else:
+                        response_text = json.dumps(result, indent=2, default=str)
+                else:
+                    response_text = str(result)
+
+                # Ensure response_text is a string and not empty
+                if not response_text or not isinstance(response_text, str):
+                    response_text = "I couldn't generate a response for your query. Please try asking about flight status, delays, equipment, or other flight operations."
+
+                logger.info(f"📤 Sending response: {response_text[:100]}...")
+
+                # Emit text message events
+                message_id = f"msg-{uuid.uuid4().hex[:8]}"
+                
+                # Message start
+                yield encoder.encode(TextMessageStartEvent(
+                    type=EventType.TEXT_MESSAGE_START,
+                    message_id=message_id,
+                    role="assistant"
+                ))
+
+                # Stream content in chunks (simulate real streaming)
+                if response_text:
+                    words = response_text.split()
+                    for word in words:
+                        yield encoder.encode(TextMessageContentEvent(
+                            type=EventType.TEXT_MESSAGE_CONTENT,
+                            message_id=message_id,
+                            delta=word + " "
+                        ))
+                        await asyncio.sleep(0.05)  # Realistic typing speed
+
+                # Message end
+                yield encoder.encode(TextMessageEndEvent(
+                    type=EventType.TEXT_MESSAGE_END,
+                    message_id=message_id
+                ))
+
+                # Run finished
+                yield encoder.encode(RunFinishedEvent(
+                    type=EventType.RUN_FINISHED,
+                    thread_id=thread_id,
+                    run_id=run_id,
+                    result={"processed": True, "query": user_message}
+                ))
+
+                logger.info(f"✅ Request completed successfully - Run: {run_id}")
+
+            except Exception as e:
+                logger.error(f"❌ Event generation error: {e}")
+                yield encoder.encode(RunErrorEvent(
+                    type=EventType.RUN_ERROR,
+                    message=f"Event generation failed: {str(e)}"
+                ))
+
+        return StreamingResponse(
+            generate_events(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "Access-Control-Allow-Origin": "*",
+                "X-Accel-Buffering": "no"
+            }
+        )
+
+    except HTTPException:
+        raise
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=400, detail="Invalid JSON in request body")
+    except Exception as e:
+        logger.error(f"❌ Server error in agent endpoint: {e}")
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+
+@app.get("/")
+async def root():
+    """Root endpoint with service info"""
+    return {
+        "status": "healthy",
+        "service": "IndiGo FlightOps AG-UI Server",
+        "version": "1.0.0",
+        "ag_ui_available": AGUI_AVAILABLE,
+        "mcp_available": MCP_AVAILABLE,
+        "endpoints": {
+            "agent": "/agent (POST)",
+            "health": "/health",
+            "tools": "/tools",
+            "query": "/query (POST)"
+        }
+    }
+
+@app.get("/health")
+async def health_check():
+    """Comprehensive health check"""
+    try:
+        if MCP_AVAILABLE:
+            await agent.ensure_connected()
+            tools = await agent.mcp_client.list_tools()
+            tools_available = len(tools.get("tools", {}))
+        else:
+            tools_available = 0
+        
+        return {
+            "status": "healthy",
+            "timestamp": asyncio.get_event_loop().time(),
+            "mcp_connected": agent.connected if MCP_AVAILABLE else False,
+            "tools_available": tools_available,
+            "ag_ui_available": AGUI_AVAILABLE,
+            "mcp_available": MCP_AVAILABLE,
+            "service": "IndiGo FlightOps AG-UI Server"
+        }
+    except Exception as e:
+        logger.error(f"❌ Health check failed: {e}")
+        return {
+            "status": "unhealthy",
+            "error": str(e),
+            "mcp_connected": False,
+            "ag_ui_available": AGUI_AVAILABLE,
+            "mcp_available": MCP_AVAILABLE
+        }
+
+@app.get("/tools")
+async def list_tools():
+    """List available tools"""
+    try:
+        if MCP_AVAILABLE:
+            await agent.ensure_connected()
+            mcp_tools = await agent.mcp_client.list_tools()
+        else:
+            mcp_tools = {"tools": {}}
+        
+        return {
+            "mcp_tools": mcp_tools,
+            "ag_ui_tools": agent.tools,
+            "total_tools": len(agent.tools),
+            "mcp_available": MCP_AVAILABLE
+        }
+    except Exception as e:
+        logger.error(f"❌ Tools listing failed: {e}")
+        return {"error": str(e)}
+
+@app.post("/query")
+async def direct_query(request: Request):
+    """Direct query endpoint for testing (non-streaming)"""
+    try:
+        body = await request.json()
+        user_query = body.get("query", "").strip()
+        
+        if not user_query:
+            raise HTTPException(status_code=400, detail="Query parameter required")
+        
+        logger.info(f"🔍 Direct query: {user_query}")
+        result = await agent.process_query(user_query)
+        
+        return {
+            "query": user_query,
+            "result": result,
+            "timestamp": asyncio.get_event_loop().time()
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Direct query failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+if __name__ == "__main__":
+    import uvicorn
+    
+    host = os.getenv("HOST", "0.0.0.0")
+    port = int(os.getenv("PORT", 8001))
+    
+    logger.info(f"🚀 Starting IndiGo FlightOps AG-UI Server on {host}:{port}")
+    
+    uvicorn.run(
+        app,
+        host=host,
+        port=port,
+        log_level="info",
+        access_log=True
+    )
+###################################################################
+{
+  "name": "flightops-chatbot",
+  "version": "1.0.0",
+  "private": true,
+  "dependencies": {
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
+    "react-scripts": "5.0.1"
+  },
+  "scripts": {
+    "start": "react-scripts start",
+    "build": "react-scripts build",
+    "test": "react-scripts test",
+    "eject": "react-scripts eject"
+  },
+  "browserslist": {
+    "production": [
+      ">0.2%",
+      "not dead",
+      "not op_mini all"
+    ],
+    "development": [
+      "last 1 chrome version",
+      "last 1 firefox version",
+      "last 1 safari version"
+    ]
+  },
+  "proxy": "http://localhost:8001"
+}
+###########################################################
+import React from 'react';
+import Chat from './components/Chat';
+import Sidebar from './components/Sidebar';
+import './components/styles/Chat.css';
+
+function App() {
+  return (
+    <div className="app">
+      <Sidebar />
+      <Chat />
+    </div>
+  );
+}
+
+export default App;
+#################################################
+import React from 'react';
+import './styles/Chat.css';
+
+const Sidebar = () => {
+  return (
+    <div className="sidebar">
+      <div className="logo-container">
+        <img 
+          src="/indigo-logo.png" 
+          alt="IndiGo Airlines" 
+          className="airline-logo"
+        />
+        <h2>FlightOps Assistant</h2>
+      </div>
+      
+      <div className="welcome-section">
+        <h3>👋 Welcome to IndiGo FlightOps!</h3>
+        <p>Your intelligent assistant for flight operations and management.</p>
+      </div>
+
+      <div className="quick-info">
+        <h4>🚀 What I can help you with:</h4>
+        <ul>
+          <li>✈️ Flight status & information</li>
+          <li>⏰ Delay information & reasons</li>
+          <li>🛩️ Aircraft equipment details</li>
+          <li>⛽ Fuel consumption data</li>
+          <li>👥 Passenger & crew information</li>
+          <li>📊 Flight analytics & reports</li>
+          <li>🔍 Search flights by route</li>
+        </ul>
+      </div>
+
+      <div className="sample-queries">
+        <h4>💡 Try asking:</h4>
+        <div className="query-examples">
+          <p>"What's the status of flight 6E 215?"</p>
+          <p>"Show me delays for flights from Delhi"</p>
+          <p>"Equipment details for flight 6E 301"</p>
+          <p>"Passenger count for yesterday's flights"</p>
+        </div>
+      </div>
+
+      <div className="footer-info">
+        <p>🛡️ Secure & Confidential</p>
+        <p>IndiGo Airlines Flight Operations</p>
+      </div>
+    </div>
+  );
+};
+
+export default Sidebar;
+##############################################################
+import React, { useState, useRef, useEffect } from 'react';
+import './styles/Chat.css';
+
+const Chat = () => {
+  const [messages, setMessages] = useState([]);
+  const [input, setInput] = useState('');
+  const [isLoading, setIsLoading] = useState(false);
+  const [currentStreamingMessage, setCurrentStreamingMessage] = useState('');
+  const messagesEndRef = useRef(null);
+
+  const scrollToBottom = () => {
+    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  };
+
+  useEffect(() => {
+    scrollToBottom();
+  }, [messages, currentStreamingMessage]);
+
+  // Add welcome message on component mount
+  useEffect(() => {
+    setMessages([{
+      id: Date.now(),
+      role: 'assistant',
+      content: 'Hello! Welcome to IndiGo FlightOps Assistant. I can help you with flight status, delays, equipment information, and more. How can I assist you today?'
+    }]);
+  }, []);
+
+  const sendMessage = async () => {
+    if (!input.trim() || isLoading) return;
+
+    const userMessage = { 
+      role: 'user', 
+      content: input, 
+      id: Date.now() 
+    };
+    setMessages(prev => [...prev, userMessage]);
+    setInput('');
+    setIsLoading(true);
+    setCurrentStreamingMessage('');
+
+    try {
+      const response = await fetch('/agent', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Accept': 'text/event-stream',
+        },
+        body: JSON.stringify({
+          thread_id: 'flightops-chat',
+          run_id: `run-${Date.now()}`,
+          messages: [...messages, userMessage].map(msg => ({
+            id: msg.id.toString(),
+            role: msg.role,
+            content: msg.content
+          })),
+          tools: [],
+          state: {}
+        })
+      });
+
+      if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status}`);
+      }
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let assistantMessage = '';
+      let messageId = null;
+      let buffer = '';
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop() || '';
+
+        for (const line of lines) {
+          if (line.startsWith('data: ')) {
+            try {
+              const eventData = JSON.parse(line.slice(6));
+              
+              if (eventData.type === 'TEXT_MESSAGE_START') {
+                messageId = eventData.message_id;
+              } else if (eventData.type === 'TEXT_MESSAGE_CONTENT') {
+                assistantMessage += eventData.delta;
+                setCurrentStreamingMessage(assistantMessage);
+              } else if (eventData.type === 'TEXT_MESSAGE_END') {
+                setMessages(prev => [...prev, {
+                  role: 'assistant',
+                  content: assistantMessage,
+                  id: messageId || Date.now()
+                }]);
+                setCurrentStreamingMessage('');
+              } else if (eventData.type === 'RUN_ERROR') {
+                console.error('Run error:', eventData.message);
+                setMessages(prev => [...prev, {
+                  role: 'assistant',
+                  content: `Error: ${eventData.message}`,
+                  id: Date.now()
+                }]);
+              }
+            } catch (e) {
+              console.error('Parse error:', e, 'Line:', line);
+            }
+          }
+        }
+      }
+    } catch (error) {
+      console.error('Request failed:', error);
+      setMessages(prev => [...prev, {
+        role: 'assistant',
+        content: 'Sorry, I encountered an error connecting to the FlightOps service. Please try again.',
+        id: Date.now()
+      }]);
+    } finally {
+      setIsLoading(false);
+      setCurrentStreamingMessage('');
+    }
+  };
+
+  const handleKeyPress = (e) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      sendMessage();
+    }
+  };
+
+  const quickQueries = [
+    "What's the status of flight 6E 215?",
+    "Show me delay information for today",
+    "Equipment details for flight 6E 301",
+    "Fuel summary for recent flights",
+    "Passenger count for yesterday's flights"
+  ];
+
+  return (
+    <div className="chat-main">
+      <div className="chat-header">
+        <h1>✈️ FlightOps Chat</h1>
+        <p>Real-time flight operations assistance</p>
+      </div>
+
+      <div className="quick-queries">
+        {quickQueries.map((query, index) => (
+          <button
+            key={index}
+            onClick={() => setInput(query)}
+            className="query-button"
+            disabled={isLoading}
+          >
+            {query}
+          </button>
+        ))}
+      </div>
+
+      <div className="messages-container">
+        {messages.map((msg) => (
+          <div key={msg.id} className={`message ${msg.role}`}>
+            <div className="message-avatar">
+              {msg.role === 'user' ? '👤' : '✈️'}
+            </div>
+            <div className="message-content">
+              {msg.content}
+            </div>
+          </div>
+        ))}
+        
+        {currentStreamingMessage && (
+          <div className="message assistant streaming">
+            <div className="message-avatar">✈️</div>
+            <div className="message-content">
+              {currentStreamingMessage}
+              <span className="cursor">▊</span>
+            </div>
+          </div>
+        )}
+        
+        {isLoading && !currentStreamingMessage && (
+          <div className="message assistant">
+            <div className="message-avatar">✈️</div>
+            <div className="message-content typing">
+              <span></span>
+              <span></span>
+              <span></span>
+            </div>
+          </div>
+        )}
+        
+        <div ref={messagesEndRef} />
+      </div>
+
+      <div className="input-container">
+        <textarea
+          value={input}
+          onChange={(e) => setInput(e.target.value)}
+          onKeyPress={handleKeyPress}
+          placeholder="Ask about flights, delays, equipment, or other flight operations..."
+          disabled={isLoading}
+          rows="2"
+        />
+        <button 
+          onClick={sendMessage} 
+          disabled={isLoading || !input.trim()}
+          className="send-button"
+        >
+          {isLoading ? '⏳' : '✈️ Send'}
+        </button>
+      </div>
+    </div>
+  );
+};
+
+export default Chat;
+##################################################################################
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body {
+  font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+  background: #f5f7fa;
+  color: #333;
+}
+
+.app {
+  display: flex;
+  height: 100vh;
+  overflow: hidden;
+}
+
+/* Sidebar Styles */
+.sidebar {
+  width: 320px;
+  background: linear-gradient(135deg, #1e3a8a 0%, #3b82f6 100%);
+  color: white;
+  padding: 2rem;
+  display: flex;
+  flex-direction: column;
+  box-shadow: 2px 0 10px rgba(0,0,0,0.1);
+  overflow-y: auto;
+}
+
+.logo-container {
+  text-align: center;
+  margin-bottom: 2rem;
+  padding-bottom: 1.5rem;
+  border-bottom: 1px solid rgba(255,255,255,0.2);
+}
+
+.airline-logo {
+  width: 200px;
+  height: auto;
+  background: white;
+  padding: 1rem;
+  border-radius: 12px;
+  margin-bottom: 1rem;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.2);
+}
+
+.logo-container h2 {
+  font-size: 1.4rem;
+  font-weight: 600;
+  color: white;
+}
+
+.welcome-section {
+  margin-bottom: 2rem;
+  padding: 1.5rem;
+  background: rgba(255,255,255,0.1);
+  border-radius: 12px;
+  backdrop-filter: blur(10px);
+}
+
+.welcome-section h3 {
+  font-size: 1.2rem;
+  margin-bottom: 0.5rem;
+  color: #fbbf24;
+}
+
+.welcome-section p {
+  font-size: 0.95rem;
+  line-height: 1.5;
+  opacity: 0.9;
+}
+
+.quick-info {
+  margin-bottom: 2rem;
+}
+
+.quick-info h4 {
+  font-size: 1.1rem;
+  margin-bottom: 1rem;
+  color: #fbbf24;
+}
+
+.quick-info ul {
+  list-style: none;
+  padding-left: 0;
+}
+
+.quick-info li {
+  padding: 0.5rem 0;
+  padding-left: 1.5rem;
+  position: relative;
+  font-size: 0.9rem;
+  line-height: 1.4;
+}
+
+.quick-info li:before {
+  content: "✓";
+  position: absolute;
+  left: 0;
+  color: #10b981;
+  font-weight: bold;
+}
+
+.sample-queries {
+  margin-bottom: 2rem;
+}
+
+.sample-queries h4 {
+  font-size: 1.1rem;
+  margin-bottom: 1rem;
+  color: #fbbf24;
+}
+
+.query-examples p {
+  background: rgba(255,255,255,0.1);
+  padding: 0.75rem;
+  margin-bottom: 0.5rem;
+  border-radius: 8px;
+  font-size: 0.85rem;
+  cursor: pointer;
+  transition: background 0.2s;
+  border-left: 3px solid #f59e0b;
+}
+
+.query-examples p:hover {
+  background: rgba(255,255,255,0.2);
+}
+
+.footer-info {
+  margin-top: auto;
+  padding-top: 1.5rem;
+  border-top: 1px solid rgba(255,255,255,0.2);
+  text-align: center;
+  font-size: 0.8rem;
+  opacity: 0.8;
+}
+
+/* Chat Main Area */
+.chat-main {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  background: white;
+}
+
+.chat-header {
+  background: white;
+  padding: 1.5rem 2rem;
+  border-bottom: 1px solid #e5e7eb;
+  box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+}
+
+.chat-header h1 {
+  font-size: 1.5rem;
+  color: #1e3a8a;
+  margin-bottom: 0.25rem;
+}
+
+.chat-header p {
+  color: #6b7280;
+  font-size: 0.9rem;
+}
+
+.quick-queries {
+  padding: 1rem 2rem;
+  background: #f8fafc;
+  border-bottom: 1px solid #e5e7eb;
+  display: flex;
+  gap: 0.5rem;
+  overflow-x: auto;
+}
+
+.query-button {
+  padding: 0.5rem 1rem;
+  background: white;
+  border: 1px solid #d1d5db;
+  border-radius: 20px;
+  font-size: 0.85rem;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: all 0.2s;
+  color: #374151;
+}
+
+.query-button:hover:not(:disabled) {
+  background: #3b82f6;
+  color: white;
+  border-color: #3b82f6;
+}
+
+.query-button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.messages-container {
+  flex: 1;
+  overflow-y: auto;
+  padding: 1.5rem 2rem;
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  background: #f8fafc;
+}
+
+.message {
+  display: flex;
+  gap: 0.75rem;
+  animation: fadeIn 0.3s ease-in;
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.message.user {
+  justify-content: flex-end;
+}
+
+.message.user .message-content {
+  background: linear-gradient(135deg, #3b82f6 0%, #1e3a8a 100%);
+  color: white;
+  border-bottom-right-radius: 4px;
+}
+
+.message.assistant .message-content {
+  background: white;
+  color: #1f2937;
+  border: 1px solid #e5e7eb;
+  border-bottom-left-radius: 4px;
+}
+
+.message-avatar {
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 1.2rem;
+  flex-shrink: 0;
+}
+
+.user .message-avatar {
+  background: #3b82f6;
+  color: white;
+}
+
+.assistant .message-avatar {
+  background: #f59e0b;
+  color: white;
+}
+
+.message-content {
+  max-width: 70%;
+  padding: 1rem 1.25rem;
+  border-radius: 18px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-wrap: break-word;
+  box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+}
+
+.message.streaming .message-content {
+  background: #f0f9ff;
+  border-color: #bae6fd;
+}
+
+.cursor {
+  animation: blink 1s infinite;
+}
+
+@keyframes blink {
+  0%, 50% { opacity: 1; }
+  51%, 100% { opacity: 0; }
+}
+
+.typing {
+  display: flex;
+  gap: 4px;
+  padding: 1rem 1.25rem !important;
+}
+
+.typing span {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #9ca3af;
+  animation: typing 1.4s infinite;
+}
+
+.typing span:nth-child(2) {
+  animation-delay: 0.2s;
+}
+
+.typing span:nth-child(3) {
+  animation-delay: 0.4s;
+}
+
+@keyframes typing {
+  0%, 60%, 100% { transform: translateY(0); }
+  30% { transform: translateY(-10px); }
+}
+
+.input-container {
+  padding: 1.5rem 2rem;
+  border-top: 1px solid #e5e7eb;
+  display: flex;
+  gap: 1rem;
+  background: white;
+  align-items: flex-end;
+}
+
+.input-container textarea {
+  flex: 1;
+  padding: 1rem;
+  border: 2px solid #e5e7eb;
+  border-radius: 12px;
+  font-size: 1rem;
+  font-family: inherit;
+  resize: none;
+  outline: none;
+  transition: border-color 0.2s;
+  max-height: 120px;
+  line-height: 1.4;
+}
+
+.input-container textarea:focus {
+  border-color: #3b82f6;
+}
+
+.input-container textarea:disabled {
+  background: #f9fafb;
+  cursor: not-allowed;
+}
+
+.send-button {
+  padding: 1rem 1.5rem;
+  background: linear-gradient(135deg, #3b82f6 0%, #1e3a8a 100%);
+  color: white;
+  border: none;
+  border-radius: 12px;
+  cursor: pointer;
+  transition: transform 0.2s, box-shadow 0.2s;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 1rem;
+  font-weight: 600;
+}
+
+.send-button:hover:not(:disabled) {
+  transform: translateY(-2px);
+  box-shadow: 0 4px 12px rgba(59, 130, 246, 0.4);
+}
+
+.send-button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  transform: none;
+}
+
+/* Scrollbar Styling */
+.messages-container::-webkit-scrollbar {
+  width: 8px;
+}
+
+.messages-container::-webkit-scrollbar-track {
+  background: #f1f5f9;
+}
+
+.messages-container::-webkit-scrollbar-thumb {
+  background: #cbd5e1;
+  border-radius: 4px;
+}
+
+.messages-container::-webkit-scrollbar-thumb:hover {
+  background: #94a3b8;
+}
+
+.sidebar::-webkit-scrollbar {
+  width: 6px;
+}
+
+.sidebar::-webkit-scrollbar-track {
+  background: rgba(255,255,255,0.1);
+}
+
+.sidebar::-webkit-scrollbar-thumb {
+  background: rgba(255,255,255,0.3);
+  border-radius: 3px;
+}
+
+.sidebar::-webkit-scrollbar-thumb:hover {
+  background: rgba(255,255,255,0.5);
+}
+
+/* Responsive Design */
+@media (max-width: 768px) {
+  .app {
+    flex-direction: column;
+  }
+  
+  .sidebar {
+    width: 100%;
+    height: auto;
+    max-height: 40vh;
+  }
+  
+  .chat-main {
+    flex: 1;
+  }
+  
+  .message-content {
+    max-width: 85%;
+  }
+  
+  .quick-queries {
+    padding: 0.75rem 1rem;
+  }
+  
+  .query-button {
+    font-size: 0.8rem;
+    padding: 0.4rem 0.8rem;
+  }
+}
+################################################################
+import React from 'react';
+import ReactDOM from 'react-dom/client';
+import App from './App';
+
+const root = ReactDOM.createRoot(document.getElementById('root'));
+root.render(
+  <React.StrictMode>
+    <App />
+  </React.StrictMode>
+);
+###################################################################
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <link rel="icon" href="%PUBLIC_URL%/indigo-logo.png" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#1e3a8a" />
+    <meta
+      name="description"
+      content="IndiGo Airlines FlightOps Chatbot - Intelligent flight operations assistance"
+    />
+    <title>IndiGo FlightOps Assistant</title>
+  </head>
+  <body>
+    <noscript>You need to enable JavaScript to run this app.</noscript>
+    <div id="root"></div>
+  </body>
+</html>
+##########################################################################
+# MCP Server Configuration
+MCP_SERVER_URL=http://127.0.0.1:8000
+
+# Azure OpenAI Configuration
+AZURE_OPENAI_KEY=your-azure-openai-key-here
+AZURE_OPENAI_ENDPOINT=your-azure-openai-endpoint-here
+AZURE_OPENAI_DEPLOYMENT=gpt-4o
+AZURE_API_VERSION=2024-12-01-preview
+
+# MongoDB Configuration
+MONGO_URI=mongodb://localhost:27017/
+MONGO_DB=flightops
+MONGO_COLLECTION=flightLegs
+
+# AG-UI Server Configuration
+HOST=0.0.0.0
+PORT=8001
+LOG_LEVEL=INFO
+#############################################################################
