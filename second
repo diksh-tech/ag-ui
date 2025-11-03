@@ -1,0 +1,153 @@
+import os
+import uuid
+import uvicorn
+from fastapi import FastAPI, Request
+from fastapi.responses import StreamingResponse
+from ag_ui.core import (
+    RunAgentInput,
+    EventType,
+    RunStartedEvent,
+    RunFinishedEvent,
+    TextMessageChunkEvent,
+    ToolCallChunkEvent,
+)
+from ag_ui.encoder import EventEncoder
+from openai import AzureOpenAI
+
+app = FastAPI(title="FlightOps AG-UI Server")
+
+# Azure OpenAI client
+client = AzureOpenAI(
+    api_key=os.getenv("AZURE_OPENAI_KEY"),
+    api_version=os.getenv("AZURE_API_VERSION", "2024-12-01-preview"),
+    azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT")
+)
+
+@app.post("/agent")
+async def flight_agent_endpoint(input_data: RunAgentInput, request: Request):
+    """AG-UI compatible flight operations agent"""
+    accept_header = request.headers.get("accept")
+    encoder = EventEncoder(accept=accept_header)
+
+    async def event_generator():
+        try:
+            # Emit RUN_STARTED
+            yield encoder.encode(
+                RunStartedEvent(
+                    type=EventType.RUN_STARTED,
+                    thread_id=input_data.thread_id,
+                    run_id=input_data.run_id
+                )
+            )
+
+            # Call Azure OpenAI with streaming
+            stream = client.chat.completions.create(
+                model=os.getenv("AZURE_OPENAI_DEPLOYMENT", "gpt-4o"),
+                stream=True,
+                tools=[
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": tool.name,
+                            "description": tool.description,
+                            "parameters": tool.parameters,
+                        }
+                    }
+                    for tool in input_data.tools
+                ] if input_data.tools else None,
+                messages=[
+                    {
+                        "role": message.role,
+                        "content": message.content or "",
+                        **({" tool_calls": message.tool_calls} if message.role == "assistant" and hasattr(message, 'tool_calls') and message.tool_calls else {}),
+                        **({" tool_call_id": message.tool_call_id} if message.role == "tool" and hasattr(message, 'tool_call_id') else {}),
+                    }
+                    for message in input_data.messages
+                ],
+            )
+
+            message_id = str(uuid.uuid4())
+
+            # Stream chunks from OpenAI
+            for chunk in stream:
+                # Handle text content
+                if chunk.choices[0].delta.content:
+                    yield encoder.encode({
+                        "type": EventType.TEXT_MESSAGE_CHUNK,
+                        "message_id": message_id,
+                        "delta": chunk.choices[0].delta.content,
+                    })
+                # Handle tool calls
+                elif chunk.choices[0].delta.tool_calls:
+                    tool_call = chunk.choices[0].delta.tool_calls[0]
+                    yield encoder.encode({
+                        "type": EventType.TOOL_CALL_CHUNK,
+                        "tool_call_id": tool_call.id,
+                        "tool_call_name": tool_call.function.name if tool_call.function else None,
+                        "parent_message_id": message_id,
+                        "delta": tool_call.function.arguments if tool_call.function else None,
+                    })
+
+            # Emit RUN_FINISHED
+            yield encoder.encode(
+                RunFinishedEvent(
+                    type=EventType.RUN_FINISHED,
+                    thread_id=input_data.thread_id,
+                    run_id=input_data.run_id
+                )
+            )
+
+        except Exception as error:
+            yield encoder.encode({
+                "type": EventType.RUN_ERROR,
+                "message": str(error)
+            })
+
+    return StreamingResponse(
+        event_generator(),
+        media_type=encoder.get_content_type()
+    )
+
+if __name__ == "__main__":
+    uvicorn.run("ag_ui_server:app", host="0.0.0.0", port=8001, reload=True)
+@##################################################################
+import asyncio
+from ag_ui.client import HttpAgent
+
+async def main():
+    # Create AG-UI HTTP agent
+    agent = HttpAgent(
+        url="http://localhost:8001/agent",
+        agent_id="flightops-agent",
+        thread_id="main-thread"
+    )
+
+    # Add user message
+    agent.messages.append({
+        "id": "msg_1",
+        "role": "user",
+        "content": "What's the status of flight 6E 215 on 2024-06-23?"
+    })
+
+    # Run agent with tools
+    result = await agent.run_agent(
+        tools=[
+            {
+                "name": "get_flight_basic_info",
+                "description": "Fetch basic flight information",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "carrier": {"type": "string"},
+                        "flight_number": {"type": "string"},
+                        "date_of_origin": {"type": "string"}
+                    }
+                }
+            }
+        ]
+    )
+
+    print("Result:", result)
+
+if __name__ == "__main__":
+    asyncio.run(main())
