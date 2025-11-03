@@ -1,0 +1,106 @@
+# agui_middleware.py
+import asyncio
+import json
+from typing import Any, Dict, Optional
+from ag_ui.core import AbstractAgent, RunAgentInput, BaseEvent, EventType
+from ag_ui.core.observable import Observable
+from pydantic_ai.ui.ag_ui import AGUIAdapter  # Basic adapter utility
+
+# Import your existing client
+from mcp_client import FlightOpsMCPClient  # Adjust import as needed
+
+class FlightOpsAGUIAgent(AbstractAgent):
+    """AG-UI Middleware that wraps the FlightOpsMCPClient."""
+    
+    def __init__(self):
+        super().__init__()
+        self.mcp_client = FlightOpsMCPClient()
+        # Initialize the client connection (you might want to do this on first run)
+        # asyncio.create_task(self.mcp_client.connect())
+
+    def run(self, input: RunAgentInput) -> Observable[BaseEvent]:
+        """Main method called by AG-UI. Returns a stream of AG-UI events."""
+        return Observable.create(lambda observer: self._run_agent(observer, input))
+
+    async def _run_agent(self, observer, input: RunAgentInput):
+        """Internal method to handle the agent run with proper event sequencing."""
+        
+        # 1. Emit RUN_STARTED event
+        observer.next(BaseEvent(type=EventType.RUN_STARTED, threadId=input.threadId, runId=input.runId))
+        
+        try:
+            # 2. Extract the latest user message
+            user_message = None
+            for msg in reversed(input.messages):
+                if msg.role == 'user':
+                    user_message = msg.content
+                    break
+            
+            if not user_message:
+                raise ValueError("No user message found in the conversation history.")
+            
+            # 3. Emit TEXT_MESSAGE_START
+            message_id = f"msg_{id(self)}"  # Generate a unique message ID
+            observer.next(BaseEvent(type=EventType.TEXT_MESSAGE_START, messageId=message_id))
+            
+            # 4. Execute the query using your existing MCP client
+            result = await self.mcp_client.run_query(user_message)
+            
+            # 5. Handle the result and stream text content
+            if "summary" in result:
+                summary_text = result["summary"]
+                # Stream the summary back as TEXT_MESSAGE_CONTENT events
+                # For simplicity, we send it as one chunk. For real streaming, chunk it.
+                observer.next(BaseEvent(
+                    type=EventType.TEXT_MESSAGE_CONTENT, 
+                    messageId=message_id, 
+                    delta=summary_text
+                ))
+            elif "error" in result:
+                error_text = f"Error: {result['error']}"
+                observer.next(BaseEvent(
+                    type=EventType.TEXT_MESSAGE_CONTENT, 
+                    messageId=message_id, 
+                    delta=error_text
+                ))
+            
+            # 6. Emit TEXT_MESSAGE_END and RUN_FINISHED
+            observer.next(BaseEvent(type=EventType.TEXT_MESSAGE_END, messageId=message_id))
+            observer.next(BaseEvent(type=EventType.RUN_FINISHED, threadId=input.threadId, runId=input.runId))
+            observer.complete()
+            
+        except Exception as e:
+            # 7. Handle errors with RUN_ERROR event
+            error_event = BaseEvent(type=EventType.RUN_ERROR, message=str(e))
+            observer.next(error_event)
+            observer.error(e)
+######################################################
+# app.py
+from fastapi import FastAPI
+from agui_middleware import FlightOpsAGUIAgent
+from pydantic_ai.ui.ag_ui.app import AGUIApp  # Provides a ready-made ASGI app
+
+# Initialize your middleware agent
+agent = FlightOpsAGUIAgent()
+
+# Create an ASGI app that handles AG-UI requests
+app = AGUIApp(agent)
+
+# Optional: If you need to run it directly
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
+################################################################
+# app_fastapi.py
+from fastapi import FastAPI, Request
+from fastapi.responses import StreamingResponse
+from agui_middleware import FlightOpsAGUIAgent
+from pydantic_ai.ui.ag_ui import AGUIAdapter
+
+app = FastAPI()
+agent = FlightOpsAGUIAgent()
+
+@app.post("/agui")
+async def run_agent(request: Request):
+    """AG-UI protocol endpoint."""
+    return await AGUIAdapter.dispatch_request(request, agent=agent)
