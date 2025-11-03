@@ -1,6 +1,6 @@
 import os
 import uuid
-import uvicorn
+from typing import AsyncGenerator
 from fastapi import FastAPI, Request
 from fastapi.responses import StreamingResponse
 from ag_ui.core import (
@@ -8,11 +8,18 @@ from ag_ui.core import (
     EventType,
     RunStartedEvent,
     RunFinishedEvent,
-    TextMessageChunkEvent,
-    ToolCallChunkEvent,
+    TextMessageStartEvent,
+    TextMessageContentEvent,
+    TextMessageEndEvent,
+    ToolCallStartEvent,
+    ToolCallArgsEvent,
+    ToolCallEndEvent,
 )
 from ag_ui.encoder import EventEncoder
 from openai import AzureOpenAI
+from dotenv import load_dotenv
+
+load_dotenv()
 
 app = FastAPI(title="FlightOps AG-UI Server")
 
@@ -26,10 +33,10 @@ client = AzureOpenAI(
 @app.post("/agent")
 async def flight_agent_endpoint(input_data: RunAgentInput, request: Request):
     """AG-UI compatible flight operations agent"""
-    accept_header = request.headers.get("accept")
+    accept_header = request.headers.get("accept", "text/event-stream")
     encoder = EventEncoder(accept=accept_header)
 
-    async def event_generator():
+    async def event_generator() -> AsyncGenerator[str, None]:
         try:
             # Emit RUN_STARTED
             yield encoder.encode(
@@ -40,53 +47,51 @@ async def flight_agent_endpoint(input_data: RunAgentInput, request: Request):
                 )
             )
 
+            # Convert messages to OpenAI format
+            messages = [
+                {
+                    "role": msg.role,
+                    "content": msg.content or "",
+                }
+                for msg in input_data.messages
+            ]
+
             # Call Azure OpenAI with streaming
             stream = client.chat.completions.create(
                 model=os.getenv("AZURE_OPENAI_DEPLOYMENT", "gpt-4o"),
                 stream=True,
-                tools=[
-                    {
-                        "type": "function",
-                        "function": {
-                            "name": tool.name,
-                            "description": tool.description,
-                            "parameters": tool.parameters,
-                        }
-                    }
-                    for tool in input_data.tools
-                ] if input_data.tools else None,
-                messages=[
-                    {
-                        "role": message.role,
-                        "content": message.content or "",
-                        **({" tool_calls": message.tool_calls} if message.role == "assistant" and hasattr(message, 'tool_calls') and message.tool_calls else {}),
-                        **({" tool_call_id": message.tool_call_id} if message.role == "tool" and hasattr(message, 'tool_call_id') else {}),
-                    }
-                    for message in input_data.messages
-                ],
+                messages=messages,
             )
 
             message_id = str(uuid.uuid4())
+            
+            # Emit TEXT_MESSAGE_START
+            yield encoder.encode(
+                TextMessageStartEvent(
+                    type=EventType.TEXT_MESSAGE_START,
+                    message_id=message_id,
+                    role="assistant"
+                )
+            )
 
             # Stream chunks from OpenAI
             for chunk in stream:
-                # Handle text content
                 if chunk.choices[0].delta.content:
-                    yield encoder.encode({
-                        "type": EventType.TEXT_MESSAGE_CHUNK,
-                        "message_id": message_id,
-                        "delta": chunk.choices[0].delta.content,
-                    })
-                # Handle tool calls
-                elif chunk.choices[0].delta.tool_calls:
-                    tool_call = chunk.choices[0].delta.tool_calls[0]
-                    yield encoder.encode({
-                        "type": EventType.TOOL_CALL_CHUNK,
-                        "tool_call_id": tool_call.id,
-                        "tool_call_name": tool_call.function.name if tool_call.function else None,
-                        "parent_message_id": message_id,
-                        "delta": tool_call.function.arguments if tool_call.function else None,
-                    })
+                    yield encoder.encode(
+                        TextMessageContentEvent(
+                            type=EventType.TEXT_MESSAGE_CONTENT,
+                            message_id=message_id,
+                            delta=chunk.choices[0].delta.content
+                        )
+                    )
+
+            # Emit TEXT_MESSAGE_END
+            yield encoder.encode(
+                TextMessageEndEvent(
+                    type=EventType.TEXT_MESSAGE_END,
+                    message_id=message_id
+                )
+            )
 
             # Emit RUN_FINISHED
             yield encoder.encode(
@@ -98,56 +103,55 @@ async def flight_agent_endpoint(input_data: RunAgentInput, request: Request):
             )
 
         except Exception as error:
-            yield encoder.encode({
-                "type": EventType.RUN_ERROR,
-                "message": str(error)
-            })
+            from ag_ui.core import RunErrorEvent
+            yield encoder.encode(
+                RunErrorEvent(
+                    type=EventType.RUN_ERROR,
+                    message=str(error)
+                )
+            )
 
     return StreamingResponse(
         event_generator(),
-        media_type=encoder.get_content_type()
+        media_type="text/event-stream"
     )
 
 if __name__ == "__main__":
+    import uvicorn
     uvicorn.run("ag_ui_server:app", host="0.0.0.0", port=8001, reload=True)
-@##################################################################
+####################################################################
 import asyncio
-from ag_ui.client import HttpAgent
+import httpx
+from ag_ui.core import RunAgentInput, UserMessage
 
-async def main():
-    # Create AG-UI HTTP agent
-    agent = HttpAgent(
-        url="http://localhost:8001/agent",
-        agent_id="flightops-agent",
-        thread_id="main-thread"
-    )
-
-    # Add user message
-    agent.messages.append({
-        "id": "msg_1",
-        "role": "user",
-        "content": "What's the status of flight 6E 215 on 2024-06-23?"
-    })
-
-    # Run agent with tools
-    result = await agent.run_agent(
-        tools=[
-            {
-                "name": "get_flight_basic_info",
-                "description": "Fetch basic flight information",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "carrier": {"type": "string"},
-                        "flight_number": {"type": "string"},
-                        "date_of_origin": {"type": "string"}
-                    }
-                }
-            }
+async def call_ag_ui_agent():
+    url = "http://localhost:8001/agent"
+    
+    # Prepare input
+    input_data = RunAgentInput(
+        thread_id="main-thread",
+        run_id="run-001",
+        messages=[
+            UserMessage(
+                id="msg-1",
+                role="user",
+                content="What's the status of flight 6E 215 on 2024-06-23?"
+            )
         ]
     )
-
-    print("Result:", result)
+    
+    # Make streaming request
+    async with httpx.AsyncClient() as client:
+        async with client.stream(
+            "POST",
+            url,
+            json=input_data.model_dump(),
+            headers={"Accept": "text/event-stream"}
+        ) as response:
+            async for line in response.aiter_lines():
+                if line.startswith("data: "):
+                    event_data = line[6:]  # Remove "data: " prefix
+                    print(event_data)
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    asyncio.run(call_ag_ui_agent())
