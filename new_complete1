@@ -2174,3 +2174,657 @@ export default App;
     40% { transform: scale(1); }
 }
 #########################################################################################
+// main.jsx
+import React from 'react'
+import ReactDOM from 'react-dom/client'
+import App from './App.jsx'   // Note the .jsx extension
+import './index.css'
+
+ReactDOM.createRoot(document.getElementById('root')).render(
+  <React.StrictMode>
+    <App />
+  </React.StrictMode>,
+)
+############################################################
+import React, { useState, useRef, useEffect } from 'react';
+import { Send, Plane, Clock, User, Wifi, AlertTriangle, Menu, X, Tool } from 'lucide-react';
+import './App.css';
+
+// Import Indigo logo - make sure to place this image in src/assets
+import indigoLogo from './assets/indigo-logo.png';
+
+// AG-UI Client for handling event streams
+class AGUIClient {
+  constructor(baseURL = 'http://localhost:8004') {
+    this.baseURL = baseURL;
+  }
+
+  async *sendMessage(userInput, threadId = null, runId = null) {
+    const response = await fetch(`${this.baseURL}/ag-ui/agent`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        messages: [{ role: 'user', content: userInput }],
+        thread_id: threadId,
+        run_id: runId,
+        tools: []
+      }),
+    });
+
+    if (!response.ok) {
+      throw new Error(`AG-UI error: ${response.status}`);
+    }
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        const chunk = decoder.decode(value);
+        const lines = chunk.split('\n');
+        
+        for (const line of lines) {
+          if (line.startsWith('data: ')) {
+            try {
+              const event = JSON.parse(line.slice(6));
+              yield event;
+            } catch (e) {
+              console.error('Error parsing AG-UI event:', e);
+            }
+          }
+        }
+      }
+    } finally {
+      reader.releaseLock();
+    }
+  }
+
+  async getHealth() {
+    const response = await fetch(`${this.baseURL}/ag-ui/health`);
+    return response.json();
+  }
+
+  async getTools() {
+    const response = await fetch(`${this.baseURL}/ag-ui/tools`);
+    return response.json();
+  }
+}
+
+function App() {
+  const [messages, setMessages] = useState([]);
+  const [input, setInput] = useState('');
+  const [isLoading, setIsLoading] = useState(false);
+  const [connectionStatus, setConnectionStatus] = useState('disconnected');
+  const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [currentThreadId, setCurrentThreadId] = useState(null);
+  const messagesEndRef = useRef(null);
+
+  const aguiClient = new AGUIClient();
+
+  const scrollToBottom = () => {
+    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  };
+
+  useEffect(() => {
+    scrollToBottom();
+  }, [messages]);
+
+  // Check server health on component mount
+  useEffect(() => {
+    checkHealth();
+  }, []);
+
+  const checkHealth = async () => {
+    try {
+      setConnectionStatus('connecting');
+      const health = await aguiClient.getHealth();
+      if (health.status === 'healthy') {
+        setConnectionStatus('connected');
+      } else {
+        setConnectionStatus('error');
+      }
+    } catch (error) {
+      setConnectionStatus('error');
+      console.error('Health check failed:', error);
+    }
+  };
+
+  // AG-UI Event Handler
+  const handleAGUIEvent = (event) => {
+    switch (event.type) {
+      case 'RUN_STARTED':
+        setCurrentThreadId(event.thread_id);
+        console.log('AG-UI Run started:', event.run_id);
+        break;
+
+      case 'TEXT_MESSAGE_START':
+        setMessages(prev => [...prev, {
+          id: event.message_id,
+          type: 'assistant',
+          content: '',
+          timestamp: new Date().toLocaleTimeString(),
+          isStreaming: true
+        }]);
+        break;
+
+      case 'TEXT_MESSAGE_CONTENT':
+        setMessages(prev => prev.map(msg => {
+          if (msg.id === event.message_id) {
+            return { ...msg, content: msg.content + (event.delta || '') };
+          }
+          return msg;
+        }));
+        break;
+
+      case 'TEXT_MESSAGE_END':
+        setMessages(prev => prev.map(msg => {
+          if (msg.id === event.message_id) {
+            return { ...msg, isStreaming: false };
+          }
+          return msg;
+        }));
+        break;
+
+      case 'TOOL_CALL_START':
+        setMessages(prev => [...prev, {
+          id: event.tool_call_id,
+          type: 'tool',
+          toolName: event.tool_name,
+          status: 'started',
+          timestamp: new Date().toLocaleTimeString()
+        }]);
+        break;
+
+      case 'TOOL_CALL_ARGS':
+        setMessages(prev => prev.map(msg => {
+          if (msg.id === event.tool_call_id && msg.type === 'tool') {
+            return { ...msg, args: event.args };
+          }
+          return msg;
+        }));
+        break;
+
+      case 'TOOL_CALL_END':
+        setMessages(prev => prev.map(msg => {
+          if (msg.id === event.tool_call_id && msg.type === 'tool') {
+            return { 
+              ...msg, 
+              status: 'completed',
+              result: event.result 
+            };
+          }
+          return msg;
+        }));
+        break;
+
+      case 'RUN_FINISHED':
+        setIsLoading(false);
+        break;
+
+      case 'RUN_ERROR':
+        setMessages(prev => [...prev, {
+          id: Date.now(),
+          type: 'error',
+          content: `AG-UI Error: ${event.message}`,
+          timestamp: new Date().toLocaleTimeString()
+        }]);
+        setIsLoading(false);
+        break;
+
+      default:
+        console.log('Unhandled AG-UI event:', event);
+    }
+  };
+
+  const sendMessage = async () => {
+    if (!input.trim() || isLoading) return;
+
+    const userMessage = {
+      id: Date.now(),
+      type: 'user',
+      content: input,
+      timestamp: new Date().toLocaleTimeString()
+    };
+
+    setMessages(prev => [...prev, userMessage]);
+    setInput('');
+    setIsLoading(true);
+
+    try {
+      for await (const event of aguiClient.sendMessage(input, currentThreadId)) {
+        handleAGUIEvent(event);
+      }
+    } catch (error) {
+      console.error('Error sending message:', error);
+      const errorMessage = {
+        id: Date.now() + 1,
+        type: 'error',
+        content: `Failed to connect to AG-UI middleware: ${error.message}`,
+        timestamp: new Date().toLocaleTimeString()
+      };
+      setMessages(prev => [...prev, errorMessage]);
+      setIsLoading(false);
+    }
+  };
+
+  const handleKeyPress = (e) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      sendMessage();
+    }
+  };
+
+  const clearChat = () => {
+    setMessages([]);
+    setCurrentThreadId(null);
+  };
+
+  const getStatusIcon = () => {
+    switch (connectionStatus) {
+      case 'connected':
+        return <Wifi className="status-icon connected" size={16} />;
+      case 'connecting':
+        return <Clock className="status-icon connecting" size={16} />;
+      case 'error':
+        return <AlertTriangle className="status-icon error" size={16} />;
+      default:
+        return <Wifi className="status-icon disconnected" size={16} />;
+    }
+  };
+
+  const getStatusText = () => {
+    switch (connectionStatus) {
+      case 'connected':
+        return 'Connected to FlightOps AG-UI';
+      case 'connecting':
+        return 'Connecting...';
+      case 'error':
+        return 'Connection Error';
+      default:
+        return 'Disconnected';
+    }
+  };
+
+  const quickQuestions = [
+    "Show me basic info for flight 6E 215",
+    "What equipment was used on flight 6E 101?",
+    "Get delay summary for flight 6E 215",
+    "Show fuel summary for flight 6E 304",
+    "Check passenger info for flight 6E 512",
+    "Get crew information for flight 6E 215"
+  ];
+
+  const handleQuickQuestion = (question) => {
+    setInput(question);
+  };
+
+  const renderMessage = (message) => {
+    if (message.type === 'tool') {
+      return (
+        <div key={message.id} className="message tool">
+          <div className="message-header">
+            <div className="message-sender">
+              <Tool size={16} />
+              <span>Tool: {message.toolName}</span>
+            </div>
+            <span className="message-time">{message.timestamp}</span>
+          </div>
+          <div className="message-content">
+            Status: {message.status}
+            {message.args && (
+              <div className="tool-args">
+                Arguments: {JSON.stringify(message.args)}
+              </div>
+            )}
+            {message.result && (
+              <details>
+                <summary>Tool Result</summary>
+                <pre>{JSON.stringify(message.result, null, 2)}</pre>
+              </details>
+            )}
+          </div>
+        </div>
+      );
+    }
+
+    return (
+      <div key={message.id} className={`message ${message.type}`}>
+        <div className="message-header">
+          <div className="message-sender">
+            {message.type === 'user' ? <User size={16} /> :
+             message.type === 'error' ? <AlertTriangle size={16} /> :
+             <Plane size={16} />}
+            <span>
+              {message.type === 'user' ? 'You' : 
+               message.type === 'error' ? 'Error' : 'FlightOps Assistant'}
+            </span>
+          </div>
+          <span className="message-time">{message.timestamp}</span>
+        </div>
+        <div className="message-content">
+          {message.content}
+          {message.isStreaming && (
+            <span className="typing-indicator">
+              <span></span>
+              <span></span>
+              <span></span>
+            </span>
+          )}
+        </div>
+      </div>
+    );
+  };
+
+  return (
+    <div className="app">
+      {/* Sidebar */}
+      <div className={`sidebar ${sidebarOpen ? 'open' : 'closed'}`}>
+        <div className="sidebar-header">
+          <img src={indigoLogo} alt="Indigo Airlines" className="indigo-logo" />
+          <button 
+            className="sidebar-toggle"
+            onClick={() => setSidebarOpen(!sidebarOpen)}
+          >
+            {sidebarOpen ? <X size={20} /> : <Menu size={20} />}
+          </button>
+        </div>
+        
+        {sidebarOpen && (
+          <div className="sidebar-content">
+            <div className="welcome-section">
+              <h3>Welcome to Indigo FlightOps!</h3>
+              <p>Now powered by AG-UI middleware.</p>
+            </div>
+
+            <div className="quick-questions">
+              <h4>Quick Questions</h4>
+              <div className="question-buttons">
+                {quickQuestions.map((question, index) => (
+                  <button
+                    key={index}
+                    className="question-btn"
+                    onClick={() => handleQuickQuestion(question)}
+                    disabled={isLoading}
+                  >
+                    {question}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div className="flight-info">
+              <h4>Flight Data Available</h4>
+              <ul>
+                <li>✓ Basic Flight Information</li>
+                <li>✓ Aircraft Equipment Details</li>
+                <li>✓ Operation Times & Delays</li>
+                <li>✓ Fuel Consumption Data</li>
+                <li>✓ Passenger Information</li>
+                <li>✓ Crew Connections</li>
+              </ul>
+            </div>
+
+            <div className="connection-status">
+              <div className="status-indicator">
+                {getStatusIcon()}
+                <span>{getStatusText()}</span>
+              </div>
+              <button onClick={checkHealth} className="refresh-status-btn">
+                Refresh Status
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* Main Content */}
+      <div className={`main-content ${!sidebarOpen ? 'expanded' : ''}`}>
+        <header className="app-header">
+          <div className="header-content">
+            <div className="logo">
+              <Plane className="logo-icon" size={24} />
+              <h1>Indigo FlightOps Assistant</h1>
+            </div>
+            <div className="status">
+              {getStatusIcon()}
+              <span className="status-text">{getStatusText()}</span>
+            </div>
+          </div>
+        </header>
+
+        <div className="chat-container">
+          <div className="messages-container">
+            {messages.length === 0 ? (
+              <div className="empty-state">
+                <img src={indigoLogo} alt="Indigo Airlines" className="empty-logo" />
+                <h2>Welcome to Indigo FlightOps Assistant</h2>
+                <p>Now powered by AG-UI middleware. Ask me about flight information, equipment details, delays, fuel data, and more for Indigo Airlines flights.</p>
+                <div className="example-queries">
+                  <h4>Try asking about:</h4>
+                  <div className="example-cards">
+                    <div className="example-card">
+                      <Plane size={20} />
+                      <span>Flight 6E 215 basic info</span>
+                    </div>
+                    <div className="example-card">
+                      <Clock size={20} />
+                      <span>Delays for flight 6E 304</span>
+                    </div>
+                    <div className="example-card">
+                      <User size={20} />
+                      <span>Passenger count on 6E 512</span>
+                    </div>
+                    <div className="example-card">
+                      <Wifi size={20} />
+                      <span>Aircraft equipment details</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            ) : (
+              messages.map((message) => renderMessage(message))
+            )}
+            {isLoading && messages[messages.length - 1]?.type !== 'assistant' && (
+              <div className="message assistant">
+                <div className="message-header">
+                  <div className="message-sender">
+                    <Plane size={16} />
+                    <span>FlightOps Assistant</span>
+                  </div>
+                </div>
+                <div className="message-content loading">
+                  <div className="typing-indicator">
+                    <span></span>
+                    <span></span>
+                    <span></span>
+                  </div>
+                </div>
+              </div>
+            )}
+            <div ref={messagesEndRef} />
+          </div>
+
+          <div className="input-container">
+            <div className="input-wrapper">
+              <textarea
+                value={input}
+                onChange={(e) => setInput(e.target.value)}
+                onKeyPress={handleKeyPress}
+                placeholder="Ask about Indigo flight information, equipment, delays, fuel data..."
+                disabled={isLoading}
+                rows={1}
+              />
+              <button 
+                onClick={sendMessage} 
+                disabled={!input.trim() || isLoading}
+                className="send-button"
+              >
+                <Send size={18} />
+              </button>
+            </div>
+            <div className="input-actions">
+              {messages.length > 0 && (
+                <button onClick={clearChat} className="clear-button">
+                  Clear Chat
+                </button>
+              )}
+              <button onClick={checkHealth} className="health-button">
+                Check Connection
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+export default App;
+#################################################################################
+/* Additional AG-UI Styles */
+.message.tool {
+    align-self: center;
+    background: #f0f9ff;
+    border: 1px solid #e0f2fe;
+    max-width: 70%;
+    margin: 0.5rem auto;
+}
+
+.message.tool .message-sender {
+    color: #0369a1;
+}
+
+.message.tool .tool-args {
+    margin: 0.5rem 0;
+    padding: 0.5rem;
+    background: white;
+    border-radius: 4px;
+    font-family: monospace;
+    font-size: 0.8rem;
+    border: 1px solid #e2e8f0;
+}
+
+.message.tool details {
+    margin-top: 0.5rem;
+}
+
+.message.tool summary {
+    cursor: pointer;
+    font-weight: 600;
+    color: var(--indigo-blue);
+    margin-bottom: 0.5rem;
+}
+
+.message.tool pre {
+    background: white;
+    padding: 0.5rem;
+    border-radius: 4px;
+    margin-top: 0.5rem;
+    font-size: 0.75rem;
+    overflow-x: auto;
+    max-height: 200px;
+    overflow-y: auto;
+    border: 1px solid #e2e8f0;
+}
+
+.typing-indicator {
+    display: inline-flex;
+    gap: 0.25rem;
+    margin-left: 0.5rem;
+}
+
+.typing-indicator span {
+    height: 6px;
+    width: 6px;
+    border-radius: 50%;
+    background: var(--text-secondary);
+    animation: typing 1.4s infinite ease-in-out;
+}
+
+.typing-indicator span:nth-child(1) { animation-delay: -0.32s; }
+.typing-indicator span:nth-child(2) { animation-delay: -0.16s; }
+
+@keyframes typing {
+    0%, 80%, 100% { transform: scale(0); }
+    40% { transform: scale(1); }
+}
+
+.refresh-status-btn {
+    background: var(--indigo-blue);
+    color: white;
+    border: none;
+    border-radius: 6px;
+    padding: 0.5rem 1rem;
+    cursor: pointer;
+    font-size: 0.875rem;
+    margin-top: 0.5rem;
+    width: 100%;
+    transition: background-color 0.2s;
+}
+
+.refresh-status-btn:hover {
+    background: var(--indigo-light);
+}
+
+.health-button {
+    background: var(--indigo-blue);
+    color: white;
+    border: none;
+    border-radius: 6px;
+    padding: 0.5rem 1rem;
+    cursor: pointer;
+    font-size: 0.875rem;
+    transition: background-color 0.2s;
+}
+
+.health-button:hover {
+    background: var(--indigo-light);
+}
+
+.input-actions {
+    display: flex;
+    gap: 0.75rem;
+    margin-top: 0.75rem;
+    justify-content: flex-end;
+}
+
+/* Responsive adjustments */
+@media (max-width: 768px) {
+    .message.tool {
+        max-width: 90%;
+    }
+    
+    .input-actions {
+        flex-direction: column;
+    }
+    
+    .health-button,
+    .clear-button {
+        width: 100%;
+    }
+}
+
+/* Scrollbar styling for tool results */
+.message.tool pre::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+}
+
+.message.tool pre::-webkit-scrollbar-track {
+    background: #f1f1f1;
+    border-radius: 4px;
+}
+
+.message.tool pre::-webkit-scrollbar-thumb {
+    background: #c1c1c1;
+    border-radius: 4px;
+}
+
+.message.tool pre::-webkit-scrollbar-thumb:hover {
+    background: #a8a8a8;
+}
