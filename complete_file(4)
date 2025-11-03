@@ -1514,3 +1514,292 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+#####################################################################################
+(venv66) PS C:\Users\Deeksha.x.Srivastava\OneDrive - InterGlobe Aviation Limited\Desktop\agui\backend> python server.py
+INFO:flightops.mcp.server:Starting FlightOps MCP Server on 127.0.0.1:8000 (transport=streamable-http)
+INFO:flightops.mcp.server:MongoDB URL: mongodb+srv://joc-dbuser:n5cqzIJSl319TZN6@mongo-airlineops-az-ddb01-pl-0.npznw.mongodb.net/, Database: jocflightdb_30jan, Collection: flight
+INFO:     Started server process [25872]
+INFO:     Waiting for application startup.
+INFO:mcp.server.streamable_http_manager:StreamableHTTP session manager started
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://127.0.0.1:8000 (Press CTRL+C to quit)
+INFO:mcp.server.streamable_http_manager:Created new transport with session ID: 78cbf09137aa4a8782ea6467ba5dc51e
+INFO:     127.0.0.1:55920 - "POST /mcp HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55923 - "POST /mcp HTTP/1.1" 202 Accepted
+INFO:     127.0.0.1:55924 - "GET /mcp HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55925 - "POST /mcp HTTP/1.1" 200 OK
+INFO:mcp.server.lowlevel.server:Processing request of type CallToolRequest
+INFO:flightops.mcp.server:Connecting to MongoDB: mongodb+srv://joc-dbuser:n5cqzIJSl319TZN6@mongo-airlineops-az-ddb01-pl-0.npznw.mongodb.net/
+INFO:     127.0.0.1:55932 - "POST /mcp HTTP/1.1" 200 OK
+INFO:mcp.server.lowlevel.server:Processing request of type ListToolsRequest
+#################################################################################################
+PS C:\Users\Deeksha.x.Srivastava\OneDrive - InterGlobe Aviation Limited\Desktop\agui> cd backend
+PS C:\Users\Deeksha.x.Srivastava\OneDrive - InterGlobe Aviation Limited\Desktop\agui\backend> python validate_integration.py
+🔍 Validating FlightOps Integration
+==================================================
+
+1. Checking MCP Server (port 8000)...
+   ✅ MCP Server should be running on port 8000
+
+2. Checking AG-UI Server (port 8001)...
+
+1. Checking MCP Server (port 8000)...
+   ✅ MCP Server should be running on port 8000
+
+2. Checking AG-UI Server (port 8001)...
+1. Checking MCP Server (port 8000)...
+   ✅ MCP Server should be running on port 8000
+
+2. Checking AG-UI Server (port 8001)...
+   ✅ MCP Server should be running on port 8000
+
+2. Checking AG-UI Server (port 8001)...
+
+2. Checking AG-UI Server (port 8001)...
+2. Checking AG-UI Server (port 8001)...
+   ✅ AG-UI Server healthy: {'status': 'healthy', 'service': 'FlightOps AG-UI Server', 'openai_configured': True}
+
+3. Checking MCP Tools Integration...
+   ❌ Tools endpoint failed: 404
+
+4. Testing Direct MCP Query...
+   ❌ Direct query failed: 404
+
+==================================================
+🎯 Validation Complete!
+Next: Run 'python ag_ui_client_enhanced.py' to test flight data queries
+PS C:\Users\Deeksha.x.Srivastava\OneDrive - InterGlobe Aviation Limited\Desktop\agui\backend> python .\validate_core_types.py    
+Traceback (most recent call last):
+  File "C:\Users\Deeksha.x.Srivastava\OneDrive - InterGlobe Aviation Limited\Desktop\agui\backend\validate_core_types.py", line 4, in <module>
+    from ag_ui.core import RunAgentInput, UserMessage, Tool, Context
+ModuleNotFoundError: No module named 'ag_ui'
+PS C:\Users\Deeksha.x.Srivastava\OneDrive - InterGlobe Aviation Limited\Desktop\agui\backend> python .\encoder_validator.py
+🎯 AG-UI EventEncoder Validation Suite
+Validating proper Server-Sent Events formatting
+🔍 Validating SSE Event Format
+==================================================
+📊 Validation Results:
+   Events processed: 10
+   Issues found: 0
+✅ All events properly formatted as SSE!
+
+⚡ Benchmarking Event Stream Performance
+==================================================
+📈 Benchmark Results:
+   Duration: 2.37 seconds
+   Events: 10
+   Data: 1728 bytes
+   Events/sec: 4.21
+   KB/sec: 0.71
+
+✅ VALIDATION COMPLETE
+PS C:\Users\Deeksha.x.Srivastava\OneDrive - InterGlobe Aviation Limited\Desktop\agui\backend> python .\encoder_validator.py
+🎯 AG-UI EventEncoder Validation Suite
+Validating proper Server-Sent Events formatting
+🔍 Validating SSE Event Format
+==================================================
+📊 Validation Results:
+   Events processed: 10
+   Issues found: 0
+✅ All events properly formatted as SSE!
+
+⚡ Benchmarking Event Stream Performance
+==================================================
+📈 Benchmark Results:
+   Duration: 2.14 seconds
+   Events: 10
+   Data: 1728 bytes
+   Events/sec: 4.67
+   KB/sec: 0.79
+
+✅ VALIDATION COMPLETE
+PS C:\Users\Deeksha.x.Srivastava\OneDrive - InterGlobe Aviation Limited\Desktop\agui\backend> 
+######################################################################################################
+(venv66) PS C:\Users\Deeksha.x.Srivastava\OneDrive - InterGlobe Aviation Limited\Desktop\agui\backend> python .\ag_ui_proper_client.py
+🔬 FlightOps Proper AG-UI Integration Test
+Using AG-UI Core Types for type-safe agent communication
+
+🔧 Testing AG-UI Tools Endpoint...
+❌ Tools test failed: All connection attempts failed
+
+Press Enter to start proper AG-UI tests...
+
+============================================================
+🚀 PROPER AG-UI TEST 1: What's the status of flight 6E 215 on 2024-06-23?
+============================================================
+🔄 Creating proper AG-UI request...
+   Thread ID: flight-ops-thread
+   Run ID: run-1762166950
+   Tools: 2
+❌ Error: All connection attempts failed
+
+============================================================
+🚀 PROPER AG-UI TEST 2: Get equipment information for flight 6E 215
+============================================================
+🔄 Creating proper AG-UI request...
+   Thread ID: flight-ops-thread
+   Run ID: run-1762166954
+   Tools: 2
+❌ Error: All connection attempts failed
+
+============================================================
+🚀 PROPER AG-UI TEST 3: Show me the delay summary for flight 6E 215
+============================================================
+🔄 Creating proper AG-UI request...
+   Thread ID: flight-ops-thread
+   Run ID: run-1762166958
+   Tools: 2
+❌ Error: All connection attempts failed
+
+============================================================
+🚀 PROPER AG-UI TEST 4: What's the passenger count on flight 6E 215?
+============================================================
+🔄 Creating proper AG-UI request...
+🚀 PROPER AG-UI TEST 4: What's the passenger count on flight 6E 215?
+============================================================
+🔄 Creating proper AG-UI request...
+🔄 Creating proper AG-UI request...
+   Thread ID: flight-ops-thread
+   Run ID: run-1762166962
+   Tools: 2
+❌ Error: All connection attempts failed
+
+============================================================
+🚀 PROPER AG-UI TEST 5: Get fuel summary for flight 6E 215 on 2024-06-23
+============================================================
+🔄 Creating proper AG-UI request...
+   Thread ID: flight-ops-thread
+   Run ID: run-1762166966
+   Tools: 2
+❌ Error: All connection attempts failed
+(venv66) PS C:\Users\Deeksha.x.Srivastava\OneDrive - InterGlobe Aviation Limited\Desktop\agui\backend> python .\ag_ui_encoder_client.py
+🔬 COMPREHENSIVE EVENTENCODER TEST SUITE
+Testing AG-UI EventEncoder for proper SSE formatting
+🔧 Testing EventEncoder Directly
+==================================================
+✅ Encoder test endpoint: True
+📧 Content-Type: text/event-stream
+📨 Sample events: 5
+
+📝 Sample Event Format:
+data: {"type":"RUN_STARTED","threadId":"test-thread","runId":"test-run"}
+
+
+
+🎯 Testing Full Event Stream with EventEncoder
+==================================================
+📤 Request: Thread=encoder-test-3b93023c, Run=run-1762168487
+🔗 Connection: 200
+📧 Response Content-Type: text/event-stream; charset=utf-8
+🔧 Encoder Header: enabled
+🚀 RUN_STARTED: None
+📊 STATE_SNAPSHOT: state updated
+   📨 MESSAGES_SNAPSHOT
+   🔄 STEP_STARTED: None
+   📨 STEP_FINISHED
+   🔄 STEP_STARTED: None
+💬 TEXT_MESSAGE_START:    📨 STATE_DELTA
+   📨 RUN_ERROR
+   📨 CUSTOM
+
+📈 Event Stream Complete:
+   Total events processed: 10
+
+🎛️ Testing Different Encodings
+==================================================
+
+🔧 Testing Accept: text/event-stream
+   📧 Response Content-Type: text/event-stream; charset=utf-8
+   🔗 Status: 200
+   📝 Sample: data: {"type":"RUN_STARTED","timestamp":1762168491276,"threadId":"encoding-test-3368","runId":"run-1...
+   📝 Sample: data: {"type":"STATE_SNAPSHOT","timestamp":1762168491276,"snapshot":{"thread_id":"encoding-test-3368...
+   📝 Sample: data: {"type":"MESSAGES_SNAPSHOT","timestamp":1762168491276,"messages":[{"id":"msg-1762168490","role...
+
+🔧 Testing Accept: application/json
+   📧 Response Content-Type: text/event-stream; charset=utf-8
+   🔗 Status: 200
+   📝 Sample: data: {"type":"RUN_STARTED","timestamp":1762168492526,"threadId":"encoding-test-29d6","runId":"run-1...
+   📝 Sample: data: {"type":"STATE_SNAPSHOT","timestamp":1762168492526,"snapshot":{"thread_id":"encoding-test-29d6...
+   📝 Sample: data: {"type":"MESSAGES_SNAPSHOT","timestamp":1762168492526,"messages":[{"id":"msg-1762168491","role...
+
+🔧 Testing Accept: application/x-ndjson
+   📧 Response Content-Type: text/event-stream; charset=utf-8
+   🔗 Status: 200
+   📝 Sample: data: {"type":"RUN_STARTED","timestamp":1762168493653,"threadId":"encoding-test-de24","runId":"run-1...
+   📝 Sample: data: {"type":"STATE_SNAPSHOT","timestamp":1762168493653,"snapshot":{"thread_id":"encoding-test-de24...
+   📝 Sample: data: {"type":"MESSAGES_SNAPSHOT","timestamp":1762168493653,"messages":[{"id":"msg-1762168492","role...
+
+🔧 Testing Accept: */*
+   📧 Response Content-Type: text/event-stream; charset=utf-8
+   🔗 Status: 200
+   📝 Sample: data: {"type":"RUN_STARTED","timestamp":1762168494680,"threadId":"encoding-test-b2a5","runId":"run-1...
+   📝 Sample: data: {"type":"STATE_SNAPSHOT","timestamp":1762168494680,"snapshot":{"thread_id":"encoding-test-b2a5...
+   📝 Sample: data: {"type":"MESSAGES_SNAPSHOT","timestamp":1762168494680,"messages":[{"id":"msg-1762168493","role...
+
+🎉 EventEncoder Testing Complete!
+The AG-UI server is now properly encoding events for HTTP streaming.                                   python .\ag_ui_encoder_client.py6) PS C:\Users\Deeksha.x.Srivastava\OneDrive - InterGlobe Aviation Limited\Desktop\agui\backend>
+🔬 COMPREHENSIVE EVENTENCODER TEST SUITE
+Testing AG-UI EventEncoder for proper SSE formatting
+🔧 Testing EventEncoder Directly
+==================================================
+✅ Encoder test endpoint: True
+📧 Content-Type: text/event-stream
+📨 Sample events: 5
+
+📝 Sample Event Format:
+data: {"type":"RUN_STARTED","threadId":"test-thread","runId":"test-run"}
+
+
+
+🎯 Testing Full Event Stream with EventEncoder
+==================================================
+📤 Request: Thread=encoder-test-8549dd92, Run=run-1762168708
+🔗 Connection: 200
+📧 Response Content-Type: text/event-stream; charset=utf-8
+🔧 Encoder Header: enabled
+🚀 RUN_STARTED: None
+📊 STATE_SNAPSHOT: state updated
+   📨 MESSAGES_SNAPSHOT
+   🔄 STEP_STARTED: None
+   📨 STEP_FINISHED
+   🔄 STEP_STARTED: None
+💬 TEXT_MESSAGE_START:    📨 STATE_DELTA
+   📨 RUN_ERROR
+   📨 CUSTOM
+
+📈 Event Stream Complete:
+   Total events processed: 10
+
+🎛️ Testing Different Encodings
+==================================================
+
+🔧 Testing Accept: text/event-stream
+   📧 Response Content-Type: text/event-stream; charset=utf-8
+   🔗 Status: 200
+   📝 Sample: data: {"type":"RUN_STARTED","timestamp":1762168712506,"threadId":"encoding-test-e57b","runId":"run-1...
+   📝 Sample: data: {"type":"STATE_SNAPSHOT","timestamp":1762168712506,"snapshot":{"thread_id":"encoding-test-e57b...
+   📝 Sample: data: {"type":"MESSAGES_SNAPSHOT","timestamp":1762168712506,"messages":[{"id":"msg-1762168711","role...
+
+🔧 Testing Accept: application/json
+   📧 Response Content-Type: text/event-stream; charset=utf-8
+   🔗 Status: 200
+   📝 Sample: data: {"type":"RUN_STARTED","timestamp":1762168713896,"threadId":"encoding-test-32ff","runId":"run-1...
+   📝 Sample: data: {"type":"STATE_SNAPSHOT","timestamp":1762168713896,"snapshot":{"thread_id":"encoding-test-32ff...
+   📝 Sample: data: {"type":"MESSAGES_SNAPSHOT","timestamp":1762168713896,"messages":[{"id":"msg-1762168712","role...
+
+🔧 Testing Accept: application/x-ndjson
+   📧 Response Content-Type: text/event-stream; charset=utf-8
+   🔗 Status: 200
+   📝 Sample: data: {"type":"RUN_STARTED","timestamp":1762168715146,"threadId":"encoding-test-c0be","runId":"run-1...
+   📝 Sample: data: {"type":"STATE_SNAPSHOT","timestamp":1762168715146,"snapshot":{"thread_id":"encoding-test-c0be...
+   📝 Sample: data: {"type":"MESSAGES_SNAPSHOT","timestamp":1762168715146,"messages":[{"id":"msg-1762168713","role...
+
+🔧 Testing Accept: */*
+   📧 Response Content-Type: text/event-stream; charset=utf-8
+   🔗 Status: 200
+   📝 Sample: data: {"type":"RUN_STARTED","timestamp":1762168716475,"threadId":"encoding-test-ba46","runId":"run-1...
+   📝 Sample: data: {"type":"STATE_SNAPSHOT","timestamp":1762168716475,"snapshot":{"thread_id":"encoding-test-ba46...
+   📝 Sample: data: {"type":"MESSAGES_SNAPSHOT","timestamp":1762168716475,"messages":[{"id":"msg-1762168715","role...
+
+🎉 EventEncoder Testing Complete!
+The AG-UI server is now properly encoding events for HTTP streaming.
