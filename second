@@ -123,43 +123,60 @@ if __name__ == "__main__":
 import asyncio
 import httpx
 import json
+from datetime import datetime
 
 async def call_ag_ui_agent():
-    url = "http://localhost:8001/"
+    url = "http://localhost:8001/agent"
     
-    # Prepare input as dict (AG-UI format)
     input_data = {
         "thread_id": "main-thread",
-        "run_id": "run-001",
-        "state": {},
+        "run_id": f"run-{int(datetime.now().timestamp())}",
         "messages": [
             {
                 "id": "msg-1",
-                "role": "user",
+                "role": "user", 
                 "content": "What's the status of flight 6E 215 on 2024-06-23?"
             }
         ],
-        "tools": [],
-        "context": [],
-        "forwarded_props": {}
+        "tools": []
     }
     
-    # Make streaming request
+    print("🔄 Connecting to AG-UI server...")
+    
     async with httpx.AsyncClient(timeout=30.0) as client:
-        async with client.stream(
-            "POST",
-            url,
-            json=input_data,
-            headers={"Accept": "text/event-stream"}
-        ) as response:
-            async for line in response.aiter_lines():
-                if line.startswith("data: "):
-                    event_json = line[6:]  # Remove "data: " prefix
-                    try:
-                        event = json.loads(event_json)
-                        print(f"Event: {event.get('type')} - {event}")
-                    except json.JSONDecodeError:
-                        print(f"Raw: {event_json}")
+        try:
+            async with client.stream(
+                "POST",
+                url,
+                json=input_data,
+                headers={"Accept": "text/event-stream"}
+            ) as response:
+                print(f"✅ Connected. Status: {response.status_code}")
+                
+                async for line in response.aiter_lines():
+                    if line.startswith("data: "):
+                        event_json = line[6:]
+                        if event_json.strip():
+                            try:
+                                event = json.loads(event_json)
+                                event_type = event.get('type', 'UNKNOWN')
+                                
+                                if event_type == 'TEXT_MESSAGE_CONTENT':
+                                    print(f"📝 {event.get('delta', '')}", end='', flush=True)
+                                elif event_type == 'RUN_STARTED':
+                                    print(f"\n🚀 {event_type}")
+                                elif event_type == 'RUN_FINISHED':
+                                    print(f"\n✅ {event_type}")
+                                elif event_type == 'RUN_ERROR':
+                                    print(f"\n❌ ERROR: {event.get('message', 'Unknown error')}")
+                                else:
+                                    print(f"\n🔹 {event_type}")
+                                    
+                            except json.JSONDecodeError:
+                                print(f"\n📦 Raw data: {event_json}")
+                                
+        except Exception as e:
+            print(f"❌ Connection failed: {e}")
 
 if __name__ == "__main__":
     asyncio.run(call_ag_ui_agent())
