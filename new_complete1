@@ -3028,3 +3028,35 @@ def test_services():
 
 if __name__ == "__main__":
     test_services()
+################################################################
+// Add this to your AGUIClient class in App.jsx
+class AGUIClient {
+  constructor(baseURL = 'http://localhost:8004') {
+    this.baseURL = baseURL;
+    this.isAvailable = false;
+  }
+
+  async checkAvailability() {
+    try {
+      const response = await fetch(`${this.baseURL}/ag-ui/health`, {
+        method: 'GET',
+        timeout: 5000
+      });
+      this.isAvailable = response.ok;
+      return this.isAvailable;
+    } catch (error) {
+      this.isAvailable = false;
+      return false;
+    }
+  }
+
+  async *sendMessage(userInput, threadId = null, runId = null) {
+    if (!this.isAvailable) {
+      throw new Error('AG-UI middleware is not available. Please make sure the backend services are running.');
+    }
+
+    // ... rest of your existing sendMessage method
+  }
+
+  // ... rest of your existing methods
+}
