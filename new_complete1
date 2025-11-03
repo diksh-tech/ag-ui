@@ -1115,3 +1115,1062 @@ TOOLS = {
         "desc": "Run a raw MongoDB query (JSON format) for complex queries.",
     },
 }
+########################################################################################
+import os
+import uuid
+import json
+import asyncio
+from typing import Dict, Any, AsyncGenerator, List, Optional
+from datetime import datetime
+
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
+
+# AG-UI imports
+try:
+    from ag_ui.encoder import EventEncoder
+    from ag_ui.core import (
+        RunAgentInput, RunStartedEvent, RunFinishedEvent, RunErrorEvent,
+        TextMessageStartEvent, TextMessageContentEvent, TextMessageEndEvent,
+        ToolCallStartEvent, ToolCallArgsEvent, ToolCallEndEvent,
+        StateSnapshotEvent, EventType, BaseEvent
+    )
+    AGUI_AVAILABLE = True
+except ImportError:
+    AGUI_AVAILABLE = False
+    print("⚠️ AG-UI not installed, using fallback events")
+
+# Your existing imports
+from mcp_client import FlightOpsMCPClient
+from tool_registry import TOOLS
+
+app = FastAPI(
+    title="FlightOps AG-UI Middleware",
+    description="Middleware that bridges FlightOps MCP system to AG-UI protocol",
+    version="1.0.0"
+)
+
+# CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+class FlightOpsAGUIMiddleware:
+    """
+    Middleware that translates between FlightOps MCP system and AG-UI protocol.
+    This enables any AG-UI compatible client to use your FlightOps system.
+    """
+    
+    def __init__(self):
+        self.mcp_client = FlightOpsMCPClient()
+        self.connected = False
+        self.encoder = EventEncoder() if AGUI_AVAILABLE else None
+        
+    async def ensure_connected(self):
+        """Ensure connection to MCP server"""
+        if not self.connected:
+            await self.mcp_client.connect()
+            self.connected = True
+    
+    def translate_mcp_tools_to_agui(self, tools_data: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Translate MCP tools format to AG-UI tools format"""
+        agui_tools = []
+        
+        for tool_name, tool_info in tools_data.get("tools", {}).items():
+            agui_tool = {
+                "name": tool_name,
+                "description": tool_info.get("description", ""),
+                "parameters": tool_info.get("inputSchema", {})
+            }
+            agui_tools.append(agui_tool)
+        
+        return agui_tools
+    
+    async def process_with_agui_events(self, user_input: str, thread_id: str = None, run_id: str = None) -> AsyncGenerator[str, None]:
+        """
+        Core middleware function that processes user input and emits AG-UI events.
+        This bridges your MCP system to the AG-UI protocol.
+        """
+        thread_id = thread_id or f"thread_{uuid.uuid4().hex[:8]}"
+        run_id = run_id or f"run_{uuid.uuid4().hex[:8]}"
+        
+        try:
+            await self.ensure_connected()
+            
+            # 1. Start AG-UI run
+            if AGUI_AVAILABLE:
+                yield self.encoder.encode(RunStartedEvent(
+                    type=EventType.RUN_STARTED,
+                    thread_id=thread_id,
+                    run_id=run_id
+                ))
+            else:
+                yield f"data: {json.dumps({'type': 'RUN_STARTED', 'thread_id': thread_id, 'run_id': run_id})}\n\n"
+            
+            # 2. Start text message
+            message_id = f"msg_{uuid.uuid4().hex[:8]}"
+            if AGUI_AVAILABLE:
+                yield self.encoder.encode(TextMessageStartEvent(
+                    type=EventType.TEXT_MESSAGE_START,
+                    message_id=message_id,
+                    role="assistant"
+                ))
+            else:
+                yield f"data: {json.dumps({'type': 'TEXT_MESSAGE_START', 'message_id': message_id, 'role': 'assistant'})}\n\n"
+            
+            # 3. Show initial processing message
+            initial_message = "🔍 Analyzing your flight operations query...\n\n"
+            if AGUI_AVAILABLE:
+                yield self.encoder.encode(TextMessageContentEvent(
+                    type=EventType.TEXT_MESSAGE_CONTENT,
+                    message_id=message_id,
+                    delta=initial_message
+                ))
+            else:
+                yield f"data: {json.dumps({'type': 'TEXT_MESSAGE_CONTENT', 'message_id': message_id, 'delta': initial_message})}\n\n"
+            
+            # 4. Plan tools using existing MCP client
+            plan_data = self.mcp_client.plan_tools(user_input)
+            plan = plan_data.get("plan", [])
+            
+            if not plan:
+                no_tools_msg = "❌ I couldn't find relevant flight operations tools for your query.\n"
+                if AGUI_AVAILABLE:
+                    yield self.encoder.encode(TextMessageContentEvent(
+                        type=EventType.TEXT_MESSAGE_CONTENT,
+                        message_id=message_id,
+                        delta=no_tools_msg
+                    ))
+                else:
+                    yield f"data: {json.dumps({'type': 'TEXT_MESSAGE_CONTENT', 'message_id': message_id, 'delta': no_tools_msg})}\n\n"
+            else:
+                # 5. Execute each tool with AG-UI events
+                execution_results = []
+                
+                for step_index, step in enumerate(plan):
+                    tool_name = step.get("tool")
+                    tool_args = step.get("arguments", {})
+                    
+                    # Clean arguments
+                    tool_args = {k: v for k, v in tool_args.items() 
+                               if v and str(v).strip().lower() != "unknown"}
+                    
+                    # AG-UI Tool Call Start
+                    tool_call_id = f"tool_{step_index}_{uuid.uuid4().hex[:8]}"
+                    if AGUI_AVAILABLE:
+                        yield self.encoder.encode(ToolCallStartEvent(
+                            type=EventType.TOOL_CALL_START,
+                            tool_call_id=tool_call_id,
+                            tool_name=tool_name,
+                            role="assistant"
+                        ))
+                    else:
+                        yield f"data: {json.dumps({'type': 'TOOL_CALL_START', 'tool_call_id': tool_call_id, 'tool_name': tool_name, 'role': 'assistant'})}\n\n"
+                    
+                    # AG-UI Tool Call Arguments
+                    if AGUI_AVAILABLE:
+                        yield self.encoder.encode(ToolCallArgsEvent(
+                            type=EventType.TOOL_CALL_ARGS,
+                            tool_call_id=tool_call_id,
+                            args=tool_args
+                        ))
+                    else:
+                        yield f"data: {json.dumps({'type': 'TOOL_CALL_ARGS', 'tool_call_id': tool_call_id, 'args': tool_args})}\n\n"
+                    
+                    # Show execution in text stream
+                    executing_msg = f"🛠️ Executing {tool_name}... "
+                    if AGUI_AVAILABLE:
+                        yield self.encoder.encode(TextMessageContentEvent(
+                            type=EventType.TEXT_MESSAGE_CONTENT,
+                            message_id=message_id,
+                            delta=executing_msg
+                        ))
+                    else:
+                        yield f"data: {json.dumps({'type': 'TEXT_MESSAGE_CONTENT', 'message_id': message_id, 'delta': executing_msg})}\n\n"
+                    
+                    try:
+                        # Execute via existing MCP client
+                        tool_result = await self.mcp_client.invoke_tool(tool_name, tool_args)
+                        execution_results.append({tool_name: tool_result})
+                        
+                        # AG-UI Tool Call End with result
+                        if AGUI_AVAILABLE:
+                            yield self.encoder.encode(ToolCallEndEvent(
+                                type=EventType.TOOL_CALL_END,
+                                tool_call_id=tool_call_id,
+                                result=tool_result
+                            ))
+                        else:
+                            yield f"data: {json.dumps({'type': 'TOOL_CALL_END', 'tool_call_id': tool_call_id, 'result': tool_result})}\n\n"
+                        
+                        done_msg = "✅ Done\n"
+                        if AGUI_AVAILABLE:
+                            yield self.encoder.encode(TextMessageContentEvent(
+                                type=EventType.TEXT_MESSAGE_CONTENT,
+                                message_id=message_id,
+                                delta=done_msg
+                            ))
+                        else:
+                            yield f"data: {json.dumps({'type': 'TEXT_MESSAGE_CONTENT', 'message_id': message_id, 'delta': done_msg})}\n\n"
+                        
+                    except Exception as tool_error:
+                        error_msg = f"❌ Failed: {str(tool_error)}\n"
+                        if AGUI_AVAILABLE:
+                            yield self.encoder.encode(TextMessageContentEvent(
+                                type=EventType.TEXT_MESSAGE_CONTENT,
+                                message_id=message_id,
+                                delta=error_msg
+                            ))
+                        else:
+                            yield f"data: {json.dumps({'type': 'TEXT_MESSAGE_CONTENT', 'message_id': message_id, 'delta': error_msg})}\n\n"
+                
+                # 6. Generate summary using existing MCP summarization
+                summary_msg = "\n📈 Generating flight operations summary...\n\n"
+                if AGUI_AVAILABLE:
+                    yield self.encoder.encode(TextMessageContentEvent(
+                        type=EventType.TEXT_MESSAGE_CONTENT,
+                        message_id=message_id,
+                        delta=summary_msg
+                    ))
+                else:
+                    yield f"data: {json.dumps({'type': 'TEXT_MESSAGE_CONTENT', 'message_id': message_id, 'delta': summary_msg})}\n\n"
+                
+                summary_data = self.mcp_client.summarize_results(user_input, plan, execution_results)
+                summary_text = summary_data.get("summary", {}).get("summary", "Summary completed.")
+                
+                # Stream the summary word by word
+                words = summary_text.split()
+                for word in words:
+                    if AGUI_AVAILABLE:
+                        yield self.encoder.encode(TextMessageContentEvent(
+                            type=EventType.TEXT_MESSAGE_CONTENT,
+                            message_id=message_id,
+                            delta=word + " "
+                        ))
+                    else:
+                        yield f"data: {json.dumps({'type': 'TEXT_MESSAGE_CONTENT', 'message_id': message_id, 'delta': word + ' '})}\n\n"
+                    await asyncio.sleep(0.03)
+            
+            # 7. End text message
+            if AGUI_AVAILABLE:
+                yield self.encoder.encode(TextMessageEndEvent(
+                    type=EventType.TEXT_MESSAGE_END,
+                    message_id=message_id
+                ))
+            else:
+                yield f"data: {json.dumps({'type': 'TEXT_MESSAGE_END', 'message_id': message_id})}\n\n"
+            
+            # 8. Final state snapshot
+            if AGUI_AVAILABLE:
+                yield self.encoder.encode(StateSnapshotEvent(
+                    type=EventType.STATE_SNAPSHOT,
+                    state={
+                        "query_type": "flight_operations",
+                        "tools_executed": [step.get("tool") for step in plan],
+                        "execution_time": datetime.now().isoformat(),
+                        "status": "success"
+                    }
+                ))
+            else:
+                yield f"data: {json.dumps({'type': 'STATE_SNAPSHOT', 'state': {'query_type': 'flight_operations', 'tools_executed': [step.get('tool') for step in plan], 'status': 'success'}})}\n\n"
+            
+            # 9. Run finished
+            if AGUI_AVAILABLE:
+                yield self.encoder.encode(RunFinishedEvent(
+                    type=EventType.RUN_FINISHED,
+                    thread_id=thread_id,
+                    run_id=run_id
+                ))
+            else:
+                yield f"data: {json.dumps({'type': 'RUN_FINISHED', 'thread_id': thread_id, 'run_id': run_id})}\n\n"
+            
+        except Exception as e:
+            # Error handling
+            error_msg = f"\n🚨 Middleware Error: {str(e)}\n"
+            if AGUI_AVAILABLE:
+                yield self.encoder.encode(TextMessageContentEvent(
+                    type=EventType.TEXT_MESSAGE_CONTENT,
+                    message_id=message_id,
+                    delta=error_msg
+                ))
+                
+                yield self.encoder.encode(RunErrorEvent(
+                    type=EventType.RUN_ERROR,
+                    message=f"Middleware translation failed: {str(e)}"
+                ))
+            else:
+                yield f"data: {json.dumps({'type': 'TEXT_MESSAGE_CONTENT', 'message_id': message_id, 'delta': error_msg})}\n\n"
+                yield f"data: {json.dumps({'type': 'RUN_ERROR', 'message': f'Middleware translation failed: {str(e)}'})}\n\n"
+
+# Global middleware instance
+flightops_middleware = FlightOpsAGUIMiddleware()
+
+@app.post("/ag-ui/agent")
+async def ag_ui_agent_endpoint(request: Request):
+    """
+    AG-UI compliant agent endpoint that bridges MCP system to AG-UI protocol.
+    This enables any AG-UI client to use your FlightOps system.
+    """
+    try:
+        # Parse request
+        body = await request.json()
+        
+        # Extract user message
+        messages = body.get("messages", [])
+        user_message = None
+        
+        for msg in messages:
+            if msg.get("role") == "user":
+                user_message = msg.get("content", "")
+                break
+        
+        if not user_message:
+            raise HTTPException(status_code=400, detail="No user message found")
+
+        print(f"🔄 AG-UI Middleware processing: '{user_message}'")
+        
+        # Generate AG-UI events from MCP execution
+        return StreamingResponse(
+            flightops_middleware.process_with_agui_events(
+                user_message,
+                body.get("thread_id"),
+                body.get("run_id")
+            ),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Middleware-Type": "FlightOps-MCP-to-AGUI",
+                "Access-Control-Allow-Origin": "*"
+            }
+        )
+        
+    except Exception as e:
+        print(f"❌ Middleware error: {e}")
+        raise HTTPException(status_code=500, detail=f"Middleware error: {str(e)}")
+
+@app.get("/ag-ui/health")
+async def middleware_health():
+    """AG-UI middleware health check"""
+    try:
+        await flightops_middleware.ensure_connected()
+        tools = await flightops_middleware.mcp_client.list_tools()
+        
+        return {
+            "status": "healthy",
+            "middleware": "FlightOps MCP to AG-UI Bridge",
+            "mcp_connected": True,
+            "ag_ui_available": AGUI_AVAILABLE,
+            "available_tools": len(tools.get("tools", {})),
+            "translation_capabilities": [
+                "MCP-tools-to-AGUI-events",
+                "FlightOps-protocol-to-AGUI-protocol", 
+                "Real-time-tool-execution",
+                "Streaming-responses"
+            ]
+        }
+    except Exception as e:
+        return {
+            "status": "unhealthy",
+            "error": str(e),
+            "ag_ui_available": AGUI_AVAILABLE
+        }
+
+@app.get("/ag-ui/tools")
+async def middleware_tools():
+    """Get available tools in AG-UI format"""
+    try:
+        await flightops_middleware.ensure_connected()
+        mcp_tools = await flightops_middleware.mcp_client.list_tools()
+        agui_tools = flightops_middleware.translate_mcp_tools_to_agui(mcp_tools)
+        
+        return {
+            "tools": agui_tools,
+            "source": "flightops-mcp-server",
+            "translated_by": "ag-ui-middleware",
+            "count": len(agui_tools)
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+@app.get("/ag-ui/status")
+async def middleware_status():
+    """Get detailed middleware status"""
+    try:
+        await flightops_middleware.ensure_connected()
+        mcp_tools = await flightops_middleware.mcp_client.list_tools()
+        
+        return {
+            "middleware": {
+                "status": "running",
+                "version": "1.0.0",
+                "translation_direction": "MCP → AG-UI",
+                "ag_ui_available": AGUI_AVAILABLE
+            },
+            "mcp_server": {
+                "connected": True,
+                "tools_available": len(mcp_tools.get("tools", {})),
+                "tools_list": list(mcp_tools.get("tools", {}).keys())
+            },
+            "ag_ui": {
+                "protocol_version": "1.0",
+                "supported_events": [
+                    "RUN_STARTED", "RUN_FINISHED", "RUN_ERROR",
+                    "TEXT_MESSAGE_*", "TOOL_CALL_*", "STATE_SNAPSHOT"
+                ]
+            }
+        }
+    except Exception as e:
+        return {
+            "middleware": {"status": "error", "error": str(e)},
+            "mcp_server": {"connected": False},
+            "ag_ui": {"protocol_version": "1.0"}
+        }
+
+@app.get("/")
+async def root():
+    return {
+        "message": "FlightOps AG-UI Middleware",
+        "status": "running",
+        "description": "Bridges FlightOps MCP system to AG-UI protocol"
+    }
+
+@app.post("/query")
+async def direct_query(request: Request):
+    """Direct query endpoint for backward compatibility"""
+    body = await request.json()
+    user_query = body.get("query", "")
+    
+    try:
+        await flightops_middleware.ensure_connected()
+        result = await flightops_middleware.mcp_client.run_query(user_query)
+        return result
+    except Exception as e:
+        return {"error": str(e)}
+
+if __name__ == "__main__":
+    import uvicorn
+    
+    print("🌉 Starting FlightOps AG-UI Middleware Bridge...")
+    print("================================================")
+    print("🔗 This middleware bridges:")
+    print("   MCP Server (port 8000) ↔ AG-UI Protocol")
+    print("📡 Endpoints:")
+    print("   - AG-UI Agent: http://localhost:8004/ag-ui/agent")
+    print("   - Health:      http://localhost:8004/ag-ui/health") 
+    print("   - Tools:       http://localhost:8004/ag-ui/tools")
+    print("   - Status:      http://localhost:8004/ag-ui/status")
+    print("🎯 Use this with any AG-UI compatible client!")
+    print(f"🔧 AG-UI Available: {AGUI_AVAILABLE}")
+    
+    uvicorn.run(app, host="0.0.0.0", port=8004, log_level="info")
+###############################################################################
+vite.config.js
+import { defineConfig } from 'vite'
+import react from '@vitejs/plugin-react'
+
+export default defineConfig({
+  plugins: [react()],
+  server: {
+    port: 3000,
+    proxy: {
+      '/api': {
+        target: 'http://localhost:8004',  // AG-UI Middleware
+        changeOrigin: true,
+        secure: false,
+        rewrite: (path) => path.replace(/^\/api/, '')
+      },
+      '/ag-ui': {
+        target: 'http://localhost:8004',  // AG-UI Middleware
+        changeOrigin: true,
+        secure: false
+      }
+    }
+  }
+})
+###################################################################################
+import subprocess
+import time
+import webbrowser
+import sys
+import os
+
+def run_command(command, name):
+    """Run a command in a subprocess"""
+    print(f"🚀 Starting {name}...")
+    try:
+        process = subprocess.Popen(command, shell=True)
+        return process
+    except Exception as e:
+        print(f"❌ Failed to start {name}: {e}")
+        return None
+
+def main():
+    print("🎯 Starting FlightOps Full Stack System")
+    print("=======================================")
+    
+    processes = []
+    
+    # Start MCP Server (port 8000)
+    processes.append(run_command("python server.py", "MCP Server"))
+    time.sleep(5)
+    
+    # Start AG-UI Middleware (port 8004) 
+    processes.append(run_command("python ag_ui_middleware.py", "AG-UI Middleware"))
+    time.sleep(5)
+    
+    print("\n✅ All backend services started!")
+    print("📊 Services Status:")
+    print("   - MCP Server:        http://localhost:8000")
+    print("   - AG-UI Middleware:  http://localhost:8004")
+    print("   - React Frontend:    http://localhost:3000")
+    print("\n🔗 Your React frontend will connect to the AG-UI Middleware")
+    print("🎯 You can now start the React frontend with: npm run dev")
+    
+    # Offer to open the browser
+    response = input("\n🌐 Open React frontend in browser? (y/n): ")
+    if response.lower() == 'y':
+        webbrowser.open('http://localhost:3000')
+    
+    try:
+        # Keep the script running
+        while True:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        print("\n🛑 Shutting down all services...")
+        for i, process in enumerate(processes):
+            if process:
+                print(f"   Stopping service {i+1}...")
+                process.terminate()
+        print("✅ All services stopped!")
+
+if __name__ == "__main__":
+    main()
+#####################################################################################################33
+import React, { useState, useRef, useEffect } from 'react';
+import { Send, Plane, Clock, User, Wifi, AlertTriangle, Menu, X, Tool } from 'lucide-react';
+import './App.css';
+
+// Import Indigo logo
+import indigoLogo from './assets/indigo-logo.png';
+
+// AG-UI Client for handling event streams
+class AGUIClient {
+  constructor(baseURL = 'http://localhost:8004') {
+    this.baseURL = baseURL;
+  }
+
+  async *sendMessage(userInput, threadId = null, runId = null) {
+    const response = await fetch(`${this.baseURL}/ag-ui/agent`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        messages: [{ role: 'user', content: userInput }],
+        thread_id: threadId,
+        run_id: runId,
+        tools: []
+      }),
+    });
+
+    if (!response.ok) {
+      throw new Error(`AG-UI error: ${response.status}`);
+    }
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        const chunk = decoder.decode(value);
+        const lines = chunk.split('\n');
+        
+        for (const line of lines) {
+          if (line.startsWith('data: ')) {
+            try {
+              const event = JSON.parse(line.slice(6));
+              yield event;
+            } catch (e) {
+              console.error('Error parsing AG-UI event:', e);
+            }
+          }
+        }
+      }
+    } finally {
+      reader.releaseLock();
+    }
+  }
+
+  async getHealth() {
+    const response = await fetch(`${this.baseURL}/ag-ui/health`);
+    return response.json();
+  }
+}
+
+function App() {
+  const [messages, setMessages] = useState([]);
+  const [input, setInput] = useState('');
+  const [isLoading, setIsLoading] = useState(false);
+  const [connectionStatus, setConnectionStatus] = useState('disconnected');
+  const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [currentThreadId, setCurrentThreadId] = useState(null);
+  const messagesEndRef = useRef(null);
+
+  const aguiClient = new AGUIClient();
+
+  const scrollToBottom = () => {
+    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  };
+
+  useEffect(() => {
+    scrollToBottom();
+  }, [messages]);
+
+  // Check server health on component mount
+  useEffect(() => {
+    checkHealth();
+  }, []);
+
+  const checkHealth = async () => {
+    try {
+      setConnectionStatus('connecting');
+      const health = await aguiClient.getHealth();
+      if (health.status === 'healthy') {
+        setConnectionStatus('connected');
+      } else {
+        setConnectionStatus('error');
+      }
+    } catch (error) {
+      setConnectionStatus('error');
+    }
+  };
+
+  // AG-UI Event Handler
+  const handleAGUIEvent = (event) => {
+    switch (event.type) {
+      case 'RUN_STARTED':
+        setCurrentThreadId(event.thread_id);
+        console.log('AG-UI Run started:', event.run_id);
+        break;
+
+      case 'TEXT_MESSAGE_START':
+        setMessages(prev => [...prev, {
+          id: event.message_id,
+          type: 'assistant',
+          content: '',
+          timestamp: new Date().toLocaleTimeString(),
+          isStreaming: true
+        }]);
+        break;
+
+      case 'TEXT_MESSAGE_CONTENT':
+        setMessages(prev => prev.map(msg => {
+          if (msg.id === event.message_id) {
+            return { ...msg, content: msg.content + (event.delta || '') };
+          }
+          return msg;
+        }));
+        break;
+
+      case 'TEXT_MESSAGE_END':
+        setMessages(prev => prev.map(msg => {
+          if (msg.id === event.message_id) {
+            return { ...msg, isStreaming: false };
+          }
+          return msg;
+        }));
+        break;
+
+      case 'TOOL_CALL_START':
+        setMessages(prev => [...prev, {
+          id: event.tool_call_id,
+          type: 'tool',
+          toolName: event.tool_name,
+          status: 'started',
+          timestamp: new Date().toLocaleTimeString()
+        }]);
+        break;
+
+      case 'TOOL_CALL_ARGS':
+        setMessages(prev => prev.map(msg => {
+          if (msg.id === event.tool_call_id && msg.type === 'tool') {
+            return { ...msg, args: event.args };
+          }
+          return msg;
+        }));
+        break;
+
+      case 'TOOL_CALL_END':
+        setMessages(prev => prev.map(msg => {
+          if (msg.id === event.tool_call_id && msg.type === 'tool') {
+            return { 
+              ...msg, 
+              status: 'completed',
+              result: event.result 
+            };
+          }
+          return msg;
+        }));
+        break;
+
+      case 'RUN_FINISHED':
+        setIsLoading(false);
+        break;
+
+      case 'RUN_ERROR':
+        setMessages(prev => [...prev, {
+          id: Date.now(),
+          type: 'error',
+          content: `AG-UI Error: ${event.message}`,
+          timestamp: new Date().toLocaleTimeString()
+        }]);
+        setIsLoading(false);
+        break;
+
+      default:
+        console.log('Unhandled AG-UI event:', event);
+    }
+  };
+
+  const sendMessage = async () => {
+    if (!input.trim() || isLoading) return;
+
+    const userMessage = {
+      id: Date.now(),
+      type: 'user',
+      content: input,
+      timestamp: new Date().toLocaleTimeString()
+    };
+
+    setMessages(prev => [...prev, userMessage]);
+    setInput('');
+    setIsLoading(true);
+
+    try {
+      for await (const event of aguiClient.sendMessage(input, currentThreadId)) {
+        handleAGUIEvent(event);
+      }
+    } catch (error) {
+      console.error('Error sending message:', error);
+      const errorMessage = {
+        id: Date.now() + 1,
+        type: 'error',
+        content: `Failed to connect to AG-UI middleware: ${error.message}`,
+        timestamp: new Date().toLocaleTimeString()
+      };
+      setMessages(prev => [...prev, errorMessage]);
+      setIsLoading(false);
+    }
+  };
+
+  const handleKeyPress = (e) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      sendMessage();
+    }
+  };
+
+  const clearChat = () => {
+    setMessages([]);
+    setCurrentThreadId(null);
+  };
+
+  const getStatusIcon = () => {
+    switch (connectionStatus) {
+      case 'connected':
+        return <Wifi className="status-icon connected" size={16} />;
+      case 'connecting':
+        return <Clock className="status-icon connecting" size={16} />;
+      case 'error':
+        return <AlertTriangle className="status-icon error" size={16} />;
+      default:
+        return <Wifi className="status-icon disconnected" size={16} />;
+    }
+  };
+
+  const getStatusText = () => {
+    switch (connectionStatus) {
+      case 'connected':
+        return 'Connected to FlightOps AG-UI';
+      case 'connecting':
+        return 'Connecting...';
+      case 'error':
+        return 'Connection Error';
+      default:
+        return 'Disconnected';
+    }
+  };
+
+  const quickQuestions = [
+    "Show me basic info for flight 6E 215",
+    "What equipment was used on flight 6E 101?",
+    "Get delay summary for flight 6E 215",
+    "Show fuel summary for flight 6E 304",
+    "Check passenger info for flight 6E 512",
+    "Get crew information for flight 6E 215"
+  ];
+
+  const handleQuickQuestion = (question) => {
+    setInput(question);
+  };
+
+  const renderMessage = (message) => {
+    if (message.type === 'tool') {
+      return (
+        <div key={message.id} className="message tool">
+          <div className="message-header">
+            <div className="message-sender">
+              <Tool size={16} />
+              <span>Tool: {message.toolName}</span>
+            </div>
+            <span className="message-time">{message.timestamp}</span>
+          </div>
+          <div className="message-content">
+            Status: {message.status}
+            {message.args && (
+              <div className="tool-args">
+                Arguments: {JSON.stringify(message.args)}
+              </div>
+            )}
+            {message.result && (
+              <details>
+                <summary>Tool Result</summary>
+                <pre>{JSON.stringify(message.result, null, 2)}</pre>
+              </details>
+            )}
+          </div>
+        </div>
+      );
+    }
+
+    // Your existing message rendering for user/assistant/error
+    return (
+      <div key={message.id} className={`message ${message.type}`}>
+        <div className="message-header">
+          <div className="message-sender">
+            {message.type === 'user' ? <User size={16} /> :
+             message.type === 'error' ? <AlertTriangle size={16} /> :
+             <Plane size={16} />}
+            <span>
+              {message.type === 'user' ? 'You' : 
+               message.type === 'error' ? 'Error' : 'FlightOps Assistant'}
+            </span>
+          </div>
+          <span className="message-time">{message.timestamp}</span>
+        </div>
+        <div className="message-content">
+          {message.content}
+          {message.isStreaming && (
+            <span className="typing-indicator">
+              <span></span>
+              <span></span>
+              <span></span>
+            </span>
+          )}
+        </div>
+      </div>
+    );
+  };
+
+  // ... rest of your existing React component (sidebar, header, etc.)
+  // Keep all your existing JSX but update the messages rendering to use renderMessage
+
+  return (
+    <div className="app">
+      {/* Your existing sidebar */}
+      <div className={`sidebar ${sidebarOpen ? 'open' : 'closed'}`}>
+        <div className="sidebar-header">
+          <img src={indigoLogo} alt="Indigo Airlines" className="indigo-logo" />
+          <button 
+            className="sidebar-toggle"
+            onClick={() => setSidebarOpen(!sidebarOpen)}
+          >
+            {sidebarOpen ? <X size={20} /> : <Menu size={20} />}
+          </button>
+        </div>
+        
+        {sidebarOpen && (
+          <div className="sidebar-content">
+            <div className="welcome-section">
+              <h3>Welcome to Indigo FlightOps!</h3>
+              <p>Now powered by AG-UI middleware.</p>
+            </div>
+
+            <div className="quick-questions">
+              <h4>Quick Questions</h4>
+              <div className="question-buttons">
+                {quickQuestions.map((question, index) => (
+                  <button
+                    key={index}
+                    className="question-btn"
+                    onClick={() => handleQuickQuestion(question)}
+                    disabled={isLoading}
+                  >
+                    {question}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div className="connection-status">
+              <div className="status-indicator">
+                {getStatusIcon()}
+                <span>{getStatusText()}</span>
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* Main Content */}
+      <div className={`main-content ${!sidebarOpen ? 'expanded' : ''}`}>
+        <header className="app-header">
+          <div className="header-content">
+            <div className="logo">
+              <Plane className="logo-icon" size={24} />
+              <h1>Indigo FlightOps Assistant</h1>
+            </div>
+            <div className="status">
+              {getStatusIcon()}
+              <span className="status-text">{getStatusText()}</span>
+            </div>
+          </div>
+        </header>
+
+        <div className="chat-container">
+          <div className="messages-container">
+            {messages.length === 0 ? (
+              <div className="empty-state">
+                <img src={indigoLogo} alt="Indigo Airlines" className="empty-logo" />
+                <h2>Welcome to Indigo FlightOps Assistant</h2>
+                <p>Now powered by AG-UI middleware. Ask me about flight information, equipment details, delays, fuel data, and more.</p>
+              </div>
+            ) : (
+              messages.map(renderMessage)
+            )}
+            {isLoading && messages[messages.length - 1]?.type !== 'assistant' && (
+              <div className="message assistant">
+                <div className="message-header">
+                  <div className="message-sender">
+                    <Plane size={16} />
+                    <span>FlightOps Assistant</span>
+                  </div>
+                </div>
+                <div className="message-content loading">
+                  <div className="typing-indicator">
+                    <span></span>
+                    <span></span>
+                    <span></span>
+                  </div>
+                </div>
+              </div>
+            )}
+            <div ref={messagesEndRef} />
+          </div>
+
+          <div className="input-container">
+            <div className="input-wrapper">
+              <textarea
+                value={input}
+                onChange={(e) => setInput(e.target.value)}
+                onKeyPress={handleKeyPress}
+                placeholder="Ask about Indigo flight information, equipment, delays, fuel data..."
+                disabled={isLoading}
+                rows={1}
+              />
+              <button 
+                onClick={sendMessage} 
+                disabled={!input.trim() || isLoading}
+                className="send-button"
+              >
+                <Send size={18} />
+              </button>
+            </div>
+            {messages.length > 0 && (
+              <button onClick={clearChat} className="clear-button">
+                Clear Chat
+              </button>
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+export default App;
+##############################################################################################
+/* AG-UI Specific Styles */
+.message.tool {
+    align-self: center;
+    background: #f0f9ff;
+    border: 1px solid #e0f2fe;
+    max-width: 70%;
+    margin: 0.5rem auto;
+}
+
+.message.tool .message-sender {
+    color: #0369a1;
+}
+
+.message.tool .tool-args {
+    margin: 0.5rem 0;
+    padding: 0.5rem;
+    background: white;
+    border-radius: 4px;
+    font-family: monospace;
+    font-size: 0.8rem;
+}
+
+.message.tool details {
+    margin-top: 0.5rem;
+}
+
+.message.tool summary {
+    cursor: pointer;
+    font-weight: 600;
+    color: var(--indigo-blue);
+}
+
+.message.tool pre {
+    background: white;
+    padding: 0.5rem;
+    border-radius: 4px;
+    margin-top: 0.5rem;
+    font-size: 0.75rem;
+    overflow-x: auto;
+    max-height: 200px;
+    overflow-y: auto;
+}
+
+.typing-indicator {
+    display: inline-flex;
+    gap: 0.25rem;
+    margin-left: 0.5rem;
+}
+
+.typing-indicator span {
+    height: 6px;
+    width: 6px;
+    border-radius: 50%;
+    background: var(--text-secondary);
+    animation: typing 1.4s infinite ease-in-out;
+}
+
+.typing-indicator span:nth-child(1) { animation-delay: -0.32s; }
+.typing-indicator span:nth-child(2) { animation-delay: -0.16s; }
+
+@keyframes typing {
+    0%, 80%, 100% { transform: scale(0); }
+    40% { transform: scale(1); }
+}
+#########################################################################################
