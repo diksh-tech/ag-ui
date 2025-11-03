@@ -459,15 +459,16 @@ if __name__ == "__main__":
     logger.info("MongoDB URL: %s, Database: %s, Collection: %s", MONGODB_URL, DATABASE_NAME, COLLECTION_NAME)
     mcp.run(transport="streamable-http")
   #########################################################################
+# mcp_client.py
 import os
 import json
 import logging
 import asyncio
 from typing import List, Dict, Any
-
 from dotenv import load_dotenv
 from openai import AzureOpenAI
 from mcp import ClientSession
+from mcp.client.stdio import stdio_client
 from mcp.client.streamable_http import streamablehttp_client
 
 from tool_registry import TOOLS
@@ -475,7 +476,7 @@ from tool_registry import TOOLS
 # Load environment variables
 load_dotenv()
 
-MCP_SERVER_URL = os.getenv("MCP_SERVER_URL", "http://127.0.0.1:8000").rstrip("/")
+MCP_SERVER_URL = os.getenv("MCP_SERVER_URL", "http://127.0.0.1:8000")
 
 # Azure OpenAI configuration
 AZURE_OPENAI_KEY = os.getenv("AZURE_OPENAI_KEY")
@@ -496,9 +497,7 @@ client_azure = AzureOpenAI(
     azure_endpoint=AZURE_OPENAI_ENDPOINT
 )
 
-# ---------------------------------------------------------------------
-#  SYSTEM PROMPTS
-# ---------------------------------------------------------------------
+# SYSTEM PROMPTS
 def _build_tool_prompt() -> str:
     """Convert TOOLS dict into compact text to feed the LLM."""
     lines = []
@@ -507,44 +506,17 @@ def _build_tool_prompt() -> str:
         lines.append(f"- {name}({arg_str}): {meta['desc']}")
     return "\n".join(lines)
 
-
 SYSTEM_PROMPT_PLAN = f"""
 You are an assistant that converts user questions into MCP tool calls.
 
 Available tools:
 {_build_tool_prompt()}
 
-You may also generate a MongoDB query directly when the question is complex
-(e.g., involves filtering, ranges, aggregation, or comparisons between flights).
-
-When using 'raw_mongodb_query':
-- Always include a key "query_json" as a valid MongoDB query (stringified JSON).
-- Optionally include "limit" to restrict results.
-- Use fields defined in the schema (like flightLegState.carrier, startStation, delays.total, etc).
-- Never invent fields or operators.
-- Use JSON, not Mongo shell syntax.
-- for passenger information in mongodb its in "flightLegState.pax.passengerCount" 
-- always
-
-Example valid output:
-{{
-  "plan": [
-    {{
-      "tool": "raw_mongodb_query",
-      "arguments": {{
-        "query_json": "{{ 'flightLegState.startStation': 'DEL', 'flightLegState.endStation': 'BOM', 'flightLegState.delays.total': {{ '$gt': '00:30' }} }}",
-        "limit": 10
-      }}
-    }}
-  ]
-}}
-
 Rules:
 1. Output only valid JSON.
 2. Always return a top-level key 'plan' as a list.
-3. If the query is simple (single flight or delay info), use existing tools.
-4. If it’s complex, use raw_mongodb_query.
-5. Do not invent tool names.
+3. Use the most appropriate tool for the query.
+4. Do not invent tool names.
 """
 
 SYSTEM_PROMPT_SUMMARIZE = """
@@ -552,41 +524,48 @@ You are an assistant that summarizes tool outputs into a concise, readable answe
 Be factual, short, and helpful.
 """
 
-# ---------------------------------------------------------------------
-#  FLIGHTOPS MCP CLIENT CLASS
-# ---------------------------------------------------------------------
 class FlightOpsMCPClient:
     def __init__(self, base_url: str = None):
-        self.base_url = (base_url or MCP_SERVER_URL).rstrip("/")
+        self.base_url = base_url or MCP_SERVER_URL
         self.session: ClientSession = None
         self._client_context = None
 
-    # -------------------- CONNECTION HANDLERS -------------------------
     async def connect(self):
+        """Connect to MCP server"""
         try:
-            logger.info(f"Connecting to MCP server at {self.base_url}")
+            logger.info(f"🔗 Connecting to MCP server at {self.base_url}")
+            
+            # Use streamable HTTP client for FastMCP
             self._client_context = streamablehttp_client(self.base_url)
             read_stream, write_stream, _ = await self._client_context.__aenter__()
+            
             self.session = ClientSession(read_stream, write_stream)
             await self.session.__aenter__()
             await self.session.initialize()
+            
             logger.info("✅ Connected to MCP server successfully")
+            
+            # Test the connection by listing tools
+            tools = await self.list_tools()
+            logger.info(f"🔧 Available tools: {len(tools.get('tools', {}))}")
+            
         except Exception as e:
-            logger.error(f"Failed to connect to MCP server: {e}")
+            logger.error(f"❌ Failed to connect to MCP server: {e}")
             raise
 
     async def disconnect(self):
+        """Disconnect from MCP server"""
         try:
             if self.session:
                 await self.session.__aexit__(None, None, None)
             if self._client_context:
                 await self._client_context.__aexit__(None, None, None)
-            logger.info("Disconnected from MCP server")
+            logger.info("🔌 Disconnected from MCP server")
         except Exception as e:
             logger.error(f"Error during disconnect: {e}")
 
-    # -------------------- AZURE OPENAI WRAPPER -------------------------
-    def _call_azure_openai(self, messages: list, temperature: float = 0.2, max_tokens: int = 2048) -> str:
+    def _call_azure_openai(self, messages: list, temperature: float = 0.1, max_tokens: int = 2048) -> str:
+        """Call Azure OpenAI API"""
         try:
             completion = client_azure.chat.completions.create(
                 model=AZURE_OPENAI_DEPLOYMENT,
@@ -596,26 +575,34 @@ class FlightOpsMCPClient:
             )
             return completion.choices[0].message.content
         except Exception as e:
-            logger.error(f"Azure OpenAI API error: {e}")
+            logger.error(f"❌ Azure OpenAI API error: {e}")
             return json.dumps({"error": str(e)})
 
-    # -------------------- MCP TOOL CALLS -------------------------
     async def list_tools(self) -> dict:
+        """List available MCP tools"""
         try:
             if not self.session:
                 await self.connect()
+                
             tools_list = await self.session.list_tools()
-            tools_dict = {tool.name: {"description": tool.description, "inputSchema": tool.inputSchema} for tool in tools_list.tools}
+            tools_dict = {
+                tool.name: {
+                    "description": tool.description,
+                    "inputSchema": tool.inputSchema
+                } for tool in tools_list.tools
+            }
             return {"tools": tools_dict}
         except Exception as e:
-            logger.error(f"Error listing tools: {e}")
+            logger.error(f"❌ Error listing tools: {e}")
             return {"error": str(e)}
 
     async def invoke_tool(self, tool_name: str, args: dict) -> dict:
+        """Invoke a specific MCP tool"""
         try:
             if not self.session:
                 await self.connect()
-            logger.info(f"Calling tool: {tool_name} with args: {args}")
+                
+            logger.info(f"🔧 Calling tool: {tool_name} with args: {args}")
             result = await self.session.call_tool(tool_name, args)
 
             if result.content:
@@ -626,21 +613,18 @@ class FlightOpsMCPClient:
                             content_items.append(json.loads(item.text))
                         except json.JSONDecodeError:
                             content_items.append(item.text)
+                
                 if len(content_items) == 1:
                     return content_items[0]
                 return {"results": content_items}
 
             return {"error": "No content in response"}
         except Exception as e:
-            logger.error(f"Error invoking tool {tool_name}: {e}")
+            logger.error(f"❌ Error invoking tool {tool_name}: {e}")
             return {"error": str(e)}
 
-    # -------------------- LLM PLANNING & SUMMARIZATION -------------------------
     def plan_tools(self, user_query: str) -> dict:
-        """
-        Ask the LLM to produce a valid JSON plan for which MCP tools to call.
-        Cleans out Markdown-style fences (```json ... ```), which some models add.
-        """
+        """Plan which tools to call for a user query"""
         messages = [
             {"role": "system", "content": SYSTEM_PROMPT_PLAN},
             {"role": "user", "content": user_query},
@@ -648,58 +632,48 @@ class FlightOpsMCPClient:
 
         content = self._call_azure_openai(messages, temperature=0.1)
         if not content:
-            logger.warning("⚠️ LLM returned empty response during plan generation.")
+            logger.warning("⚠️ LLM returned empty response")
             return {"plan": []}
 
-        
+        # Clean the response
         cleaned = content.strip()
         if cleaned.startswith("```"):
-            
             cleaned = cleaned.strip("`")
             if cleaned.lower().startswith("json"):
                 cleaned = cleaned[4:].strip()
-            
             cleaned = cleaned.replace("```", "").strip()
 
-        
-        if cleaned != content:
-            logger.debug(f"🔍 Cleaned LLM plan output:\n{cleaned}")
-
-       
         try:
             plan = json.loads(cleaned)
             if isinstance(plan, dict) and "plan" in plan:
                 return plan
             else:
-                logger.warning("⚠️ LLM output did not contain 'plan' key.")
+                logger.warning("⚠️ LLM output did not contain 'plan' key")
                 return {"plan": []}
         except json.JSONDecodeError:
-            logger.warning(f"❌ Could not parse LLM plan output after cleaning:\n{cleaned}")
+            logger.warning(f"❌ Could not parse LLM plan: {cleaned}")
             return {"plan": []}
 
-
     def summarize_results(self, user_query: str, plan: list, results: list) -> dict:
+        """Summarize the tool execution results"""
         messages = [
             {"role": "system", "content": SYSTEM_PROMPT_SUMMARIZE},
-            {"role": "user", "content": f"Question:\n{user_query}"},
-            {"role": "assistant", "content": f"Plan:\n{json.dumps(plan, indent=2)}"},
-            {"role": "assistant", "content": f"Results:\n{json.dumps(results, indent=2)}"},
+            {"role": "user", "content": f"Question: {user_query}"},
+            {"role": "assistant", "content": f"Plan: {json.dumps(plan, indent=2)}"},
+            {"role": "assistant", "content": f"Results: {json.dumps(results, indent=2)}"},
         ]
         summary = self._call_azure_openai(messages, temperature=0.3)
         return {"summary": summary}
 
-   
     async def run_query(self, user_query: str) -> dict:
-        """
-        Full flow:
-        1. LLM plans which tools to call (including possible MongoDB query).
-        2. Execute tools sequentially via MCP.
-        3. Summarize results using LLM.
-        """
+        """Main method to run a user query through MCP tools"""
         try:
-            logger.info(f"User query: {user_query}")
+            logger.info(f"👤 User query: {user_query}")
+            
+            # Plan which tools to use
             plan_data = self.plan_tools(user_query)
             plan = plan_data.get("plan", [])
+            
             if not plan:
                 return {"error": "LLM did not produce a valid tool plan."}
 
@@ -711,27 +685,25 @@ class FlightOpsMCPClient:
                 # Clean up bad args
                 args = {k: v for k, v in args.items() if v and str(v).strip().lower() != "unknown"}
 
-                # Safety for MongoDB query
-                if tool == "raw_mongodb_query":
-                    query_json = args.get("query_json", "")
-                    if not query_json:
-                        results.append({"raw_mongodb_query": {"error": "Empty query_json"}})
-                        continue
-                    # Enforce safe default limit
-                    args["limit"] = int(args.get("limit", 50))
-                    logger.info(f"Executing raw MongoDB query: {query_json}")
-
+                # Execute the tool
                 resp = await self.invoke_tool(tool, args)
                 results.append({tool: resp})
 
+            # Summarize results
             summary = self.summarize_results(user_query, plan, results)
-            return {"plan": plan, "results": results, "summary": summary}
+            
+            return {
+                "plan": plan, 
+                "results": results, 
+                "summary": summary,
+                "status": "success"
+            }
+            
         except Exception as e:
-            logger.error(f"Error in run_query: {e}")
-            return {"error": str(e)}
+            logger.error(f"❌ Error in run_query: {e}")
+            return {"error": str(e), "status": "error"}
 #####################################################################
 # tool_registry.py
-
 TOOLS = {
     "get_flight_basic_info": {
         "args": ["carrier", "flight_number", "date_of_origin"],
@@ -753,47 +725,38 @@ TOOLS = {
         "args": ["carrier", "flight_number", "date_of_origin"],
         "desc": "Get delay information including delay reasons, durations, and total delay time.",
     },
+    "get_passenger_info": {
+        "args": ["carrier", "flight_number", "date_of_origin"],
+        "desc": "Get passenger count and connection information for the flight.",
+    },
+    "get_crew_info": {
+        "args": ["carrier", "flight_number", "date_of_origin"],
+        "desc": "Get crew connections and details for the flight.",
+    },
     "health_check": {
         "args": [],
         "desc": "Check the health status of the MCP server and database connection.",
     },
     "raw_mongodb_query": {
         "args": ["query_json", "limit"],
-        "desc": "Run a raw MongoDB query (JSON format) for debugging purposes.",
+        "desc": "Run a raw MongoDB query (JSON format) for complex queries.",
     },
 }
 ############################################################################
-# ag_ui_encoder_server.py
+# ag_ui_working_server.py
 import os
 import uuid
 import json
 import asyncio
-from typing import List, Any, Optional, AsyncGenerator, Dict
-from datetime import datetime
+from typing import List, Any, AsyncGenerator
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
 
-# Import AG-UI Core Events and Encoder
-from ag_ui.core import (
-    RunAgentInput, UserMessage, Tool, Context, State,
-    EventType, RunStartedEvent, RunFinishedEvent, RunErrorEvent,
-    StepStartedEvent, StepFinishedEvent, TextMessageStartEvent,
-    TextMessageContentEvent, TextMessageEndEvent, ToolCallStartEvent,
-    StateSnapshotEvent, StateDeltaEvent, MessagesSnapshotEvent,
-    CustomEvent
-)
-
-from ag_ui.encoder import EventEncoder
-
-# Import your MCP client
-from mcp_client import FlightOpsMCPClient
-from tool_registry import TOOLS
-
 load_dotenv()
 
-app = FastAPI(title="FlightOps AG-UI Encoder Server")
+app = FastAPI(title="FlightOps AG-UI Working Server")
 
 # Add CORS middleware
 app.add_middleware(
@@ -803,268 +766,140 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-class FlightOpsEncoderAgent:
+# Import after environment is loaded
+try:
+    from ag_ui.core import RunAgentInput, UserMessage
+    from ag_ui.encoder import EventEncoder
+    AGUI_AVAILABLE = True
+except ImportError:
+    AGUI_AVAILABLE = False
+    print("⚠️ AG-UI not installed, using fallback")
+
+from mcp_client import FlightOpsMCPClient
+from tool_registry import TOOLS
+
+class WorkingFlightOpsAgent:
     def __init__(self):
         self.mcp_client = FlightOpsMCPClient()
-        self._connected = False
-        self._session_state = {}
+        self.connected = False
 
-    async def connect(self):
-        if not self._connected:
+    async def ensure_connected(self):
+        """Ensure MCP client is connected"""
+        if not self.connected:
             await self.mcp_client.connect()
-            self._connected = True
+            self.connected = True
 
-    def _get_timestamp(self) -> int:
-        """Get current timestamp in milliseconds"""
-        return int(datetime.now().timestamp() * 1000)
-
-    def _create_agui_tools(self) -> List[Tool]:
-        """Convert MCP tools to AG-UI Tool format"""
-        agui_tools = []
-        
-        for tool_name, tool_meta in TOOLS.items():
-            properties = {}
-            for arg in tool_meta["args"]:
-                properties[arg] = {"type": "string"}
-            
-            parameters = {
-                "type": "object",
-                "properties": properties,
-                "required": tool_meta["args"]
-            }
-            
-            agui_tool = Tool(
-                name=tool_name,
-                description=tool_meta["desc"],
-                parameters=parameters
-            )
-            agui_tools.append(agui_tool)
-        
-        return agui_tools
-
-    async def process_agent_input(self, input_data: RunAgentInput, encoder: EventEncoder) -> AsyncGenerator[str, None]:
-        """Process AG-UI input and yield properly encoded events"""
-        try:
-            # Update session state
-            self._session_state["current_run"] = input_data.run_id
-            self._session_state["active_thread"] = input_data.thread_id
-
-            # 1. Emit RUN_STARTED event
-            yield encoder.encode(RunStartedEvent(
-                type=EventType.RUN_STARTED,
-                timestamp=self._get_timestamp(),
-                thread_id=input_data.thread_id,
-                run_id=input_data.run_id
-            ))
-
-            # 2. Emit initial state snapshot
-            yield encoder.encode(StateSnapshotEvent(
-                type=EventType.STATE_SNAPSHOT,
-                timestamp=self._get_timestamp(),
-                snapshot={
-                    "thread_id": input_data.thread_id,
-                    "session_start": datetime.now().isoformat(),
-                    "tools_available": list(TOOLS.keys()),
-                    "last_activity": datetime.now().isoformat(),
-                    **self._session_state
-                }
-            ))
-
-            # 3. Emit messages snapshot
-            yield encoder.encode(MessagesSnapshotEvent(
-                type=EventType.MESSAGES_SNAPSHOT,
-                timestamp=self._get_timestamp(),
-                messages=input_data.messages
-            ))
-
-            # 4. STEP: Connect to MCP
-            yield encoder.encode(StepStartedEvent(
-                type=EventType.STEP_STARTED,
-                timestamp=self._get_timestamp(),
-                step_name="connect_mcp_client"
-            ))
-
-            await self.connect()
-
-            yield encoder.encode(StepFinishedEvent(
-                type=EventType.STEP_FINISHED,
-                timestamp=self._get_timestamp(),
-                step_name="connect_mcp_client"
-            ))
-
-            # 5. Get user message
-            user_message = None
-            for msg in reversed(input_data.messages):
-                if isinstance(msg, UserMessage):
-                    user_message = msg.content
-                    break
-
-            if not user_message:
-                raise ValueError("No user message found")
-
-            # 6. STEP: Process flight query
-            yield encoder.encode(StepStartedEvent(
-                type=EventType.STEP_STARTED,
-                timestamp=self._get_timestamp(),
-                step_name="process_flight_query"
-            ))
-
-            # 7. Emit TEXT_MESSAGE_START
-            message_id = f"msg-{uuid.uuid4().hex[:8]}"
-            yield encoder.encode(TextMessageStartEvent(
-                type=EventType.TEXT_MESSAGE_START,
-                timestamp=self._get_timestamp(),
-                message_id=message_id,
-                role="assistant"
-            ))
-
-            # 8. Process the query with MCP client
-            mcp_result = await self.mcp_client.run_query(user_message)
-            
-            # Update state with query result metadata
-            self._session_state["last_query"] = user_message
-            self._session_state["last_result_type"] = "flight_data"
-
-            # 9. Emit state delta for the update
-            yield encoder.encode(StateDeltaEvent(
-                type=EventType.STATE_DELTA,
-                timestamp=self._get_timestamp(),
-                delta=[
-                    {
-                        "op": "add",
-                        "path": "/last_query",
-                        "value": user_message
-                    },
-                    {
-                        "op": "add", 
-                        "path": "/last_result_type",
-                        "value": "flight_data"
-                    }
-                ]
-            ))
-
-            # 10. Extract and stream response
-            response_text = ""
-            if "summary" in mcp_result:
-                response_text = mcp_result["summary"]
-            elif "error" in mcp_result:
-                response_text = f"Error: {mcp_result['error']}"
-                # Emit custom error event
-                yield encoder.encode(CustomEvent(
-                    type=EventType.CUSTOM,
-                    timestamp=self._get_timestamp(),
-                    name="flight_query_error",
-                    value={"error": mcp_result["error"], "query": user_message}
-                ))
-            else:
-                response_text = "I've processed your flight data query using our database tools."
-
-            # 11. Stream text content with proper chunking using EventEncoder
-            words = response_text.split()
-            for i, word in enumerate(words):
-                yield encoder.encode(TextMessageContentEvent(
-                    type=EventType.TEXT_MESSAGE_CONTENT,
-                    timestamp=self._get_timestamp(),
-                    message_id=message_id,
-                    delta=word + (" " if i < len(words) - 1 else "")
-                ))
-                await asyncio.sleep(0.02)
-
-            # 12. Emit TEXT_MESSAGE_END
-            yield encoder.encode(TextMessageEndEvent(
-                type=EventType.TEXT_MESSAGE_END,
-                timestamp=self._get_timestamp(),
-                message_id=message_id
-            ))
-
-            # 13. STEP: Finalize processing
-            yield encoder.encode(StepFinishedEvent(
-                type=EventType.STEP_FINISHED,
-                timestamp=self._get_timestamp(),
-                step_name="process_flight_query"
-            ))
-
-            # 14. Emit final state snapshot
-            yield encoder.encode(StateSnapshotEvent(
-                type=EventType.STATE_SNAPSHOT,
-                timestamp=self._get_timestamp(),
-                snapshot={
-                    "thread_id": input_data.thread_id,
-                    "session_start": datetime.now().isoformat(),
-                    "tools_available": list(TOOLS.keys()),
-                    "last_activity": datetime.now().isoformat(),
-                    "query_completed": True,
-                    **self._session_state
-                }
-            ))
-
-            # 15. Emit RUN_FINISHED with result
-            yield encoder.encode(RunFinishedEvent(
-                type=EventType.RUN_FINISHED,
-                timestamp=self._get_timestamp(),
-                thread_id=input_data.thread_id,
-                run_id=input_data.run_id,
-                result={
-                    "status": "success",
-                    "query_type": "flight_operations",
-                    "response_length": len(response_text),
-                    "tools_used": list(TOOLS.keys()) if "summary" in mcp_result else []
-                }
-            ))
-
-        except Exception as error:
-            # Emit RUN_ERROR event using encoder
-            yield encoder.encode(RunErrorEvent(
-                type=EventType.RUN_ERROR,
-                timestamp=self._get_timestamp(),
-                message=str(error),
-                code="AGENT_EXECUTION_ERROR"
-            ))
-
-            # Emit custom error event for debugging
-            yield encoder.encode(CustomEvent(
-                type=EventType.CUSTOM,
-                timestamp=self._get_timestamp(),
-                name="agent_execution_failed",
-                value={"error": str(error), "run_id": input_data.run_id}
-            ))
+    async def process_query(self, user_message: str):
+        """Process user query and return results"""
+        await self.ensure_connected()
+        return await self.mcp_client.run_query(user_message)
 
 # Global agent instance
-agent = FlightOpsEncoderAgent()
+agent = WorkingFlightOpsAgent()
 
 @app.post("/agent")
-async def flight_agent_endpoint(request: Request):
-    """AG-UI endpoint using proper EventEncoder for SSE formatting"""
+async def agent_endpoint(request: Request):
+    """Main AG-UI agent endpoint"""
     try:
-        # Parse request body as RunAgentInput
+        # Parse request
         body = await request.json()
-        input_data = RunAgentInput(**body)
         
-        # Get Accept header for encoder
-        accept_header = request.headers.get("accept", "text/event-stream")
+        # Extract user message
+        messages = body.get("messages", [])
+        user_message = None
         
-        # Initialize EventEncoder with client's Accept header
-        encoder = EventEncoder(accept=accept_header)
+        for msg in messages:
+            if msg.get("role") == "user":
+                user_message = msg.get("content", "")
+                break
         
-        print(f"🎯 Starting AG-UI run with EventEncoder:")
-        print(f"   Thread: {input_data.thread_id}")
-        print(f"   Run: {input_data.run_id}")
-        print(f"   Messages: {len(input_data.messages)}")
-        print(f"   Encoder Content-Type: {encoder.get_content_type()}")
+        if not user_message:
+            raise HTTPException(status_code=400, detail="No user message found")
 
-        async def event_generator() -> AsyncGenerator[str, None]:
-            async for encoded_event in agent.process_agent_input(input_data, encoder):
-                yield encoded_event
+        print(f"📥 Processing query: {user_message}")
+
+        # Initialize encoder
+        encoder = EventEncoder(accept="text/event-stream")
+
+        async def generate_events():
+            """Generate AG-UI events"""
+            try:
+                # Start event
+                if AGUI_AVAILABLE:
+                    from ag_ui.core import RunStartedEvent, RunFinishedEvent, RunErrorEvent
+                    from ag_ui.core import TextMessageStartEvent, TextMessageContentEvent, TextMessageEndEvent
+                    from ag_ui.core import EventType
+                    
+                    # Emit run started
+                    yield encoder.encode(RunStartedEvent(
+                        type=EventType.RUN_STARTED,
+                        thread_id=body.get("thread_id", "default"),
+                        run_id=body.get("run_id", f"run-{uuid.uuid4().hex[:8]}")
+                    ))
+
+                    # Emit text message start
+                    message_id = f"msg-{uuid.uuid4().hex[:8]}"
+                    yield encoder.encode(TextMessageStartEvent(
+                        type=EventType.TEXT_MESSAGE_START,
+                        message_id=message_id,
+                        role="assistant"
+                    ))
+
+                # Process the query
+                result = await agent.process_query(user_message)
+                
+                # Extract response text
+                if "summary" in result:
+                    response_text = result["summary"]
+                elif "error" in result:
+                    response_text = f"Error: {result['error']}"
+                else:
+                    response_text = "I've processed your flight data query."
+
+                # Stream response
+                words = response_text.split()
+                for word in words:
+                    if AGUI_AVAILABLE:
+                        yield encoder.encode(TextMessageContentEvent(
+                            type=EventType.TEXT_MESSAGE_CONTENT,
+                            message_id=message_id,
+                            delta=word + " "
+                        ))
+                    else:
+                        yield f"data: {json.dumps({'type': 'TEXT_MESSAGE_CONTENT', 'delta': word + ' '})}\n\n"
+                    
+                    await asyncio.sleep(0.05)
+
+                # End events
+                if AGUI_AVAILABLE:
+                    yield encoder.encode(TextMessageEndEvent(
+                        type=EventType.TEXT_MESSAGE_END,
+                        message_id=message_id
+                    ))
+                    
+                    yield encoder.encode(RunFinishedEvent(
+                        type=EventType.RUN_FINISHED,
+                        thread_id=body.get("thread_id", "default"),
+                        run_id=body.get("run_id", f"run-{uuid.uuid4().hex[:8]}")
+                    ))
+
+            except Exception as error:
+                print(f"❌ Error in event generation: {error}")
+                if AGUI_AVAILABLE:
+                    yield encoder.encode(RunErrorEvent(
+                        type=EventType.RUN_ERROR,
+                        message=str(error)
+                    ))
+                else:
+                    yield f"data: {json.dumps({'type': 'RUN_ERROR', 'message': str(error)})}\n\n"
 
         return StreamingResponse(
-            event_generator(),
-            media_type=encoder.get_content_type(),
+            generate_events(),
+            media_type="text/event-stream",
             headers={
                 "Cache-Control": "no-cache",
                 "Connection": "keep-alive",
                 "Access-Control-Allow-Origin": "*",
-                "X-AG-UI-Version": "1.0",
-                "X-Event-Encoder": "enabled"
             }
         )
 
@@ -1073,70 +908,184 @@ async def flight_agent_endpoint(request: Request):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/")
+async def root():
+    return {"status": "healthy", "service": "FlightOps AG-UI Server"}
+
+@app.get("/health")
 async def health_check():
-    return {
-        "status": "healthy", 
-        "service": "FlightOps AG-UI Encoder Server",
-        "encoder": "EventEncoder enabled",
-        "supported_tools": list(TOOLS.keys())
-    }
+    """Health check endpoint"""
+    try:
+        await agent.ensure_connected()
+        tools = await agent.mcp_client.list_tools()
+        return {
+            "status": "healthy",
+            "mcp_connected": True,
+            "tools_available": len(tools.get("tools", {})),
+            "ag_ui_available": AGUI_AVAILABLE
+        }
+    except Exception as e:
+        return {
+            "status": "unhealthy", 
+            "mcp_connected": False,
+            "error": str(e),
+            "ag_ui_available": AGUI_AVAILABLE
+        }
 
 @app.get("/tools")
-async def list_agui_tools():
-    """List tools in AG-UI format"""
-    tools = agent._create_agui_tools()
-    return {
-        "tools": [tool.model_dump() for tool in tools]
-    }
+async def list_tools():
+    """List available MCP tools"""
+    try:
+        await agent.ensure_connected()
+        return await agent.mcp_client.list_tools()
+    except Exception as e:
+        return {"error": str(e)}
 
-@app.get("/encoder/test")
-async def encoder_test_endpoint():
-    """Test endpoint to demonstrate EventEncoder functionality"""
+@app.post("/query")
+async def direct_query(request: Request):
+    """Direct query endpoint for testing"""
+    body = await request.json()
+    user_query = body.get("query", "")
     
-    # Create test events
-    test_events = []
-    encoder = EventEncoder()
-    
-    # Test different event types
-    test_events.append(encoder.encode(RunStartedEvent(
-        type=EventType.RUN_STARTED,
-        thread_id="test-thread",
-        run_id="test-run"
-    )))
-    
-    test_events.append(encoder.encode(TextMessageStartEvent(
-        type=EventType.TEXT_MESSAGE_START,
-        message_id="test-msg",
-        role="assistant"
-    )))
-    
-    test_events.append(encoder.encode(TextMessageContentEvent(
-        type=EventType.TEXT_MESSAGE_CONTENT,
-        message_id="test-msg", 
-        delta="Hello from EventEncoder!"
-    )))
-    
-    test_events.append(encoder.encode(TextMessageEndEvent(
-        type=EventType.TEXT_MESSAGE_END,
-        message_id="test-msg"
-    )))
-    
-    test_events.append(encoder.encode(RunFinishedEvent(
-        type=EventType.RUN_FINISHED,
-        thread_id="test-thread",
-        run_id="test-run"
-    )))
-    
-    return {
-        "encoder_test": True,
-        "content_type": encoder.get_content_type(),
-        "sample_events": test_events
-    }
+    try:
+        result = await agent.process_query(user_query)
+        return result
+    except Exception as e:
+        return {"error": str(e)}
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("ag_ui_encoder_server:app", host="0.0.0.0", port=8001, reload=True)
-####################################################################
+    print("🚀 Starting FlightOps AG-UI Working Server...")
+    uvicorn.run(app, host="0.0.0.0", port=8001, log_level="info")
+#############################################################################################
+# test_client.py
+import asyncio
+import httpx
+import json
+
+async def test_health():
+    """Test server health"""
+    async with httpx.AsyncClient() as client:
+        try:
+            response = await client.get("http://localhost:8001/health")
+            print(f"🏥 Health Check: {response.status_code}")
+            print(json.dumps(response.json(), indent=2))
+        except Exception as e:
+            print(f"❌ Health check failed: {e}")
+
+async def test_tools():
+    """Test tools endpoint"""
+    async with httpx.AsyncClient() as client:
+        try:
+            response = await client.get("http://localhost:8001/tools")
+            print(f"🔧 Tools Check: {response.status_code}")
+            data = response.json()
+            if "tools" in data:
+                print(f"✅ Available tools: {len(data['tools'])}")
+                for tool_name in data["tools"].keys():
+                    print(f"   - {tool_name}")
+            else:
+                print(f"❌ No tools: {data}")
+        except Exception as e:
+            print(f"❌ Tools check failed: {e}")
+
+async def test_direct_query():
+    """Test direct query"""
+    async with httpx.AsyncClient() as client:
+        try:
+            test_queries = [
+                "health check",
+                "What's the status of flight 6E 215?",
+                "Get flight basic info for 6E 215"
+            ]
+            
+            for query in test_queries:
+                print(f"\n🔍 Testing: {query}")
+                response = await client.post(
+                    "http://localhost:8001/query",
+                    json={"query": query}
+                )
+                print(f"📊 Response: {response.status_code}")
+                result = response.json()
+                
+                if "summary" in result:
+                    print(f"✅ Summary: {result['summary'][:100]}...")
+                elif "error" in result:
+                    print(f"❌ Error: {result['error']}")
+                else:
+                    print(f"📦 Result: {result}")
+                    
+        except Exception as e:
+            print(f"❌ Direct query failed: {e}")
+
+async def test_agui_agent():
+    """Test AG-UI agent endpoint"""
+    async with httpx.AsyncClient() as client:
+        try:
+            test_input = {
+                "thread_id": "test-thread",
+                "run_id": "test-run-001",
+                "messages": [
+                    {
+                        "id": "msg-1",
+                        "role": "user",
+                        "content": "What's the status of flight 6E 215 on 2024-06-23?"
+                    }
+                ],
+                "tools": []
+            }
+            
+            print(f"\n🎯 Testing AG-UI Agent...")
+            async with client.stream(
+                "POST",
+                "http://localhost:8001/agent",
+                json=test_input,
+                headers={"Accept": "text/event-stream"}
+            ) as response:
+                
+                print(f"🔗 Status: {response.status_code}")
+                
+                async for line in response.aiter_lines():
+                    if line.startswith('data: '):
+                        try:
+                            event = json.loads(line[6:])
+                            event_type = event.get('type', 'UNKNOWN')
+                            
+                            if event_type == 'TEXT_MESSAGE_CONTENT':
+                                print(event.get('delta', ''), end='', flush=True)
+                            elif event_type == 'RUN_STARTED':
+                                print("🚀 Run started...")
+                            elif event_type == 'RUN_FINISHED':
+                                print("\n✅ Run completed!")
+                            elif event_type == 'RUN_ERROR':
+                                print(f"\n❌ Error: {event.get('message')}")
+                                
+                        except json.JSONDecodeError:
+                            continue
+                            
+        except Exception as e:
+            print(f"❌ AG-UI agent test failed: {e}")
+
+async def main():
+    print("🔬 FLIGHTOPS SYSTEM TEST SUITE")
+    print("=" * 50)
+    
+    # 1. Test health
+    await test_health()
+    
+    # 2. Test tools
+    await test_tools()
+    
+    # 3. Test direct query
+    await test_direct_query()
+    
+    # 4. Test AG-UI agent
+    await test_agui_agent()
+    
+    print("\n🎉 TESTING COMPLETE!")
+
+if __name__ == "__main__":
+    asyncio.run(main())
+################################################################################################
 # ag_ui_encoder_client.py
 import asyncio
 import httpx
@@ -1514,292 +1463,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-#####################################################################################
-(venv66) PS C:\Users\Deeksha.x.Srivastava\OneDrive - InterGlobe Aviation Limited\Desktop\agui\backend> python server.py
-INFO:flightops.mcp.server:Starting FlightOps MCP Server on 127.0.0.1:8000 (transport=streamable-http)
-INFO:flightops.mcp.server:MongoDB URL: mongodb+srv://joc-dbuser:n5cqzIJSl319TZN6@mongo-airlineops-az-ddb01-pl-0.npznw.mongodb.net/, Database: jocflightdb_30jan, Collection: flight
-INFO:     Started server process [25872]
-INFO:     Waiting for application startup.
-INFO:mcp.server.streamable_http_manager:StreamableHTTP session manager started
-INFO:     Application startup complete.
-INFO:     Uvicorn running on http://127.0.0.1:8000 (Press CTRL+C to quit)
-INFO:mcp.server.streamable_http_manager:Created new transport with session ID: 78cbf09137aa4a8782ea6467ba5dc51e
-INFO:     127.0.0.1:55920 - "POST /mcp HTTP/1.1" 200 OK
-INFO:     127.0.0.1:55923 - "POST /mcp HTTP/1.1" 202 Accepted
-INFO:     127.0.0.1:55924 - "GET /mcp HTTP/1.1" 200 OK
-INFO:     127.0.0.1:55925 - "POST /mcp HTTP/1.1" 200 OK
-INFO:mcp.server.lowlevel.server:Processing request of type CallToolRequest
-INFO:flightops.mcp.server:Connecting to MongoDB: mongodb+srv://joc-dbuser:n5cqzIJSl319TZN6@mongo-airlineops-az-ddb01-pl-0.npznw.mongodb.net/
-INFO:     127.0.0.1:55932 - "POST /mcp HTTP/1.1" 200 OK
-INFO:mcp.server.lowlevel.server:Processing request of type ListToolsRequest
-#################################################################################################
-PS C:\Users\Deeksha.x.Srivastava\OneDrive - InterGlobe Aviation Limited\Desktop\agui> cd backend
-PS C:\Users\Deeksha.x.Srivastava\OneDrive - InterGlobe Aviation Limited\Desktop\agui\backend> python validate_integration.py
-🔍 Validating FlightOps Integration
-==================================================
 
-1. Checking MCP Server (port 8000)...
-   ✅ MCP Server should be running on port 8000
-
-2. Checking AG-UI Server (port 8001)...
-
-1. Checking MCP Server (port 8000)...
-   ✅ MCP Server should be running on port 8000
-
-2. Checking AG-UI Server (port 8001)...
-1. Checking MCP Server (port 8000)...
-   ✅ MCP Server should be running on port 8000
-
-2. Checking AG-UI Server (port 8001)...
-   ✅ MCP Server should be running on port 8000
-
-2. Checking AG-UI Server (port 8001)...
-
-2. Checking AG-UI Server (port 8001)...
-2. Checking AG-UI Server (port 8001)...
-   ✅ AG-UI Server healthy: {'status': 'healthy', 'service': 'FlightOps AG-UI Server', 'openai_configured': True}
-
-3. Checking MCP Tools Integration...
-   ❌ Tools endpoint failed: 404
-
-4. Testing Direct MCP Query...
-   ❌ Direct query failed: 404
-
-==================================================
-🎯 Validation Complete!
-Next: Run 'python ag_ui_client_enhanced.py' to test flight data queries
-PS C:\Users\Deeksha.x.Srivastava\OneDrive - InterGlobe Aviation Limited\Desktop\agui\backend> python .\validate_core_types.py    
-Traceback (most recent call last):
-  File "C:\Users\Deeksha.x.Srivastava\OneDrive - InterGlobe Aviation Limited\Desktop\agui\backend\validate_core_types.py", line 4, in <module>
-    from ag_ui.core import RunAgentInput, UserMessage, Tool, Context
-ModuleNotFoundError: No module named 'ag_ui'
-PS C:\Users\Deeksha.x.Srivastava\OneDrive - InterGlobe Aviation Limited\Desktop\agui\backend> python .\encoder_validator.py
-🎯 AG-UI EventEncoder Validation Suite
-Validating proper Server-Sent Events formatting
-🔍 Validating SSE Event Format
-==================================================
-📊 Validation Results:
-   Events processed: 10
-   Issues found: 0
-✅ All events properly formatted as SSE!
-
-⚡ Benchmarking Event Stream Performance
-==================================================
-📈 Benchmark Results:
-   Duration: 2.37 seconds
-   Events: 10
-   Data: 1728 bytes
-   Events/sec: 4.21
-   KB/sec: 0.71
-
-✅ VALIDATION COMPLETE
-PS C:\Users\Deeksha.x.Srivastava\OneDrive - InterGlobe Aviation Limited\Desktop\agui\backend> python .\encoder_validator.py
-🎯 AG-UI EventEncoder Validation Suite
-Validating proper Server-Sent Events formatting
-🔍 Validating SSE Event Format
-==================================================
-📊 Validation Results:
-   Events processed: 10
-   Issues found: 0
-✅ All events properly formatted as SSE!
-
-⚡ Benchmarking Event Stream Performance
-==================================================
-📈 Benchmark Results:
-   Duration: 2.14 seconds
-   Events: 10
-   Data: 1728 bytes
-   Events/sec: 4.67
-   KB/sec: 0.79
-
-✅ VALIDATION COMPLETE
-PS C:\Users\Deeksha.x.Srivastava\OneDrive - InterGlobe Aviation Limited\Desktop\agui\backend> 
-######################################################################################################
-(venv66) PS C:\Users\Deeksha.x.Srivastava\OneDrive - InterGlobe Aviation Limited\Desktop\agui\backend> python .\ag_ui_proper_client.py
-🔬 FlightOps Proper AG-UI Integration Test
-Using AG-UI Core Types for type-safe agent communication
-
-🔧 Testing AG-UI Tools Endpoint...
-❌ Tools test failed: All connection attempts failed
-
-Press Enter to start proper AG-UI tests...
-
-============================================================
-🚀 PROPER AG-UI TEST 1: What's the status of flight 6E 215 on 2024-06-23?
-============================================================
-🔄 Creating proper AG-UI request...
-   Thread ID: flight-ops-thread
-   Run ID: run-1762166950
-   Tools: 2
-❌ Error: All connection attempts failed
-
-============================================================
-🚀 PROPER AG-UI TEST 2: Get equipment information for flight 6E 215
-============================================================
-🔄 Creating proper AG-UI request...
-   Thread ID: flight-ops-thread
-   Run ID: run-1762166954
-   Tools: 2
-❌ Error: All connection attempts failed
-
-============================================================
-🚀 PROPER AG-UI TEST 3: Show me the delay summary for flight 6E 215
-============================================================
-🔄 Creating proper AG-UI request...
-   Thread ID: flight-ops-thread
-   Run ID: run-1762166958
-   Tools: 2
-❌ Error: All connection attempts failed
-
-============================================================
-🚀 PROPER AG-UI TEST 4: What's the passenger count on flight 6E 215?
-============================================================
-🔄 Creating proper AG-UI request...
-🚀 PROPER AG-UI TEST 4: What's the passenger count on flight 6E 215?
-============================================================
-🔄 Creating proper AG-UI request...
-🔄 Creating proper AG-UI request...
-   Thread ID: flight-ops-thread
-   Run ID: run-1762166962
-   Tools: 2
-❌ Error: All connection attempts failed
-
-============================================================
-🚀 PROPER AG-UI TEST 5: Get fuel summary for flight 6E 215 on 2024-06-23
-============================================================
-🔄 Creating proper AG-UI request...
-   Thread ID: flight-ops-thread
-   Run ID: run-1762166966
-   Tools: 2
-❌ Error: All connection attempts failed
-(venv66) PS C:\Users\Deeksha.x.Srivastava\OneDrive - InterGlobe Aviation Limited\Desktop\agui\backend> python .\ag_ui_encoder_client.py
-🔬 COMPREHENSIVE EVENTENCODER TEST SUITE
-Testing AG-UI EventEncoder for proper SSE formatting
-🔧 Testing EventEncoder Directly
-==================================================
-✅ Encoder test endpoint: True
-📧 Content-Type: text/event-stream
-📨 Sample events: 5
-
-📝 Sample Event Format:
-data: {"type":"RUN_STARTED","threadId":"test-thread","runId":"test-run"}
-
-
-
-🎯 Testing Full Event Stream with EventEncoder
-==================================================
-📤 Request: Thread=encoder-test-3b93023c, Run=run-1762168487
-🔗 Connection: 200
-📧 Response Content-Type: text/event-stream; charset=utf-8
-🔧 Encoder Header: enabled
-🚀 RUN_STARTED: None
-📊 STATE_SNAPSHOT: state updated
-   📨 MESSAGES_SNAPSHOT
-   🔄 STEP_STARTED: None
-   📨 STEP_FINISHED
-   🔄 STEP_STARTED: None
-💬 TEXT_MESSAGE_START:    📨 STATE_DELTA
-   📨 RUN_ERROR
-   📨 CUSTOM
-
-📈 Event Stream Complete:
-   Total events processed: 10
-
-🎛️ Testing Different Encodings
-==================================================
-
-🔧 Testing Accept: text/event-stream
-   📧 Response Content-Type: text/event-stream; charset=utf-8
-   🔗 Status: 200
-   📝 Sample: data: {"type":"RUN_STARTED","timestamp":1762168491276,"threadId":"encoding-test-3368","runId":"run-1...
-   📝 Sample: data: {"type":"STATE_SNAPSHOT","timestamp":1762168491276,"snapshot":{"thread_id":"encoding-test-3368...
-   📝 Sample: data: {"type":"MESSAGES_SNAPSHOT","timestamp":1762168491276,"messages":[{"id":"msg-1762168490","role...
-
-🔧 Testing Accept: application/json
-   📧 Response Content-Type: text/event-stream; charset=utf-8
-   🔗 Status: 200
-   📝 Sample: data: {"type":"RUN_STARTED","timestamp":1762168492526,"threadId":"encoding-test-29d6","runId":"run-1...
-   📝 Sample: data: {"type":"STATE_SNAPSHOT","timestamp":1762168492526,"snapshot":{"thread_id":"encoding-test-29d6...
-   📝 Sample: data: {"type":"MESSAGES_SNAPSHOT","timestamp":1762168492526,"messages":[{"id":"msg-1762168491","role...
-
-🔧 Testing Accept: application/x-ndjson
-   📧 Response Content-Type: text/event-stream; charset=utf-8
-   🔗 Status: 200
-   📝 Sample: data: {"type":"RUN_STARTED","timestamp":1762168493653,"threadId":"encoding-test-de24","runId":"run-1...
-   📝 Sample: data: {"type":"STATE_SNAPSHOT","timestamp":1762168493653,"snapshot":{"thread_id":"encoding-test-de24...
-   📝 Sample: data: {"type":"MESSAGES_SNAPSHOT","timestamp":1762168493653,"messages":[{"id":"msg-1762168492","role...
-
-🔧 Testing Accept: */*
-   📧 Response Content-Type: text/event-stream; charset=utf-8
-   🔗 Status: 200
-   📝 Sample: data: {"type":"RUN_STARTED","timestamp":1762168494680,"threadId":"encoding-test-b2a5","runId":"run-1...
-   📝 Sample: data: {"type":"STATE_SNAPSHOT","timestamp":1762168494680,"snapshot":{"thread_id":"encoding-test-b2a5...
-   📝 Sample: data: {"type":"MESSAGES_SNAPSHOT","timestamp":1762168494680,"messages":[{"id":"msg-1762168493","role...
-
-🎉 EventEncoder Testing Complete!
-The AG-UI server is now properly encoding events for HTTP streaming.                                   python .\ag_ui_encoder_client.py6) PS C:\Users\Deeksha.x.Srivastava\OneDrive - InterGlobe Aviation Limited\Desktop\agui\backend>
-🔬 COMPREHENSIVE EVENTENCODER TEST SUITE
-Testing AG-UI EventEncoder for proper SSE formatting
-🔧 Testing EventEncoder Directly
-==================================================
-✅ Encoder test endpoint: True
-📧 Content-Type: text/event-stream
-📨 Sample events: 5
-
-📝 Sample Event Format:
-data: {"type":"RUN_STARTED","threadId":"test-thread","runId":"test-run"}
-
-
-
-🎯 Testing Full Event Stream with EventEncoder
-==================================================
-📤 Request: Thread=encoder-test-8549dd92, Run=run-1762168708
-🔗 Connection: 200
-📧 Response Content-Type: text/event-stream; charset=utf-8
-🔧 Encoder Header: enabled
-🚀 RUN_STARTED: None
-📊 STATE_SNAPSHOT: state updated
-   📨 MESSAGES_SNAPSHOT
-   🔄 STEP_STARTED: None
-   📨 STEP_FINISHED
-   🔄 STEP_STARTED: None
-💬 TEXT_MESSAGE_START:    📨 STATE_DELTA
-   📨 RUN_ERROR
-   📨 CUSTOM
-
-📈 Event Stream Complete:
-   Total events processed: 10
-
-🎛️ Testing Different Encodings
-==================================================
-
-🔧 Testing Accept: text/event-stream
-   📧 Response Content-Type: text/event-stream; charset=utf-8
-   🔗 Status: 200
-   📝 Sample: data: {"type":"RUN_STARTED","timestamp":1762168712506,"threadId":"encoding-test-e57b","runId":"run-1...
-   📝 Sample: data: {"type":"STATE_SNAPSHOT","timestamp":1762168712506,"snapshot":{"thread_id":"encoding-test-e57b...
-   📝 Sample: data: {"type":"MESSAGES_SNAPSHOT","timestamp":1762168712506,"messages":[{"id":"msg-1762168711","role...
-
-🔧 Testing Accept: application/json
-   📧 Response Content-Type: text/event-stream; charset=utf-8
-   🔗 Status: 200
-   📝 Sample: data: {"type":"RUN_STARTED","timestamp":1762168713896,"threadId":"encoding-test-32ff","runId":"run-1...
-   📝 Sample: data: {"type":"STATE_SNAPSHOT","timestamp":1762168713896,"snapshot":{"thread_id":"encoding-test-32ff...
-   📝 Sample: data: {"type":"MESSAGES_SNAPSHOT","timestamp":1762168713896,"messages":[{"id":"msg-1762168712","role...
-
-🔧 Testing Accept: application/x-ndjson
-   📧 Response Content-Type: text/event-stream; charset=utf-8
-   🔗 Status: 200
-   📝 Sample: data: {"type":"RUN_STARTED","timestamp":1762168715146,"threadId":"encoding-test-c0be","runId":"run-1...
-   📝 Sample: data: {"type":"STATE_SNAPSHOT","timestamp":1762168715146,"snapshot":{"thread_id":"encoding-test-c0be...
-   📝 Sample: data: {"type":"MESSAGES_SNAPSHOT","timestamp":1762168715146,"messages":[{"id":"msg-1762168713","role...
-
-🔧 Testing Accept: */*
-   📧 Response Content-Type: text/event-stream; charset=utf-8
-   🔗 Status: 200
-   📝 Sample: data: {"type":"RUN_STARTED","timestamp":1762168716475,"threadId":"encoding-test-ba46","runId":"run-1...
-   📝 Sample: data: {"type":"STATE_SNAPSHOT","timestamp":1762168716475,"snapshot":{"thread_id":"encoding-test-ba46...
-   📝 Sample: data: {"type":"MESSAGES_SNAPSHOT","timestamp":1762168716475,"messages":[{"id":"msg-1762168715","role...
-
-🎉 EventEncoder Testing Complete!
-The AG-UI server is now properly encoding events for HTTP streaming.
