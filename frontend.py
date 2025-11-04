@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect } from 'react';
-import '../Chat.css';
+import './Chat.css';
 
 const Chat = () => {
   const [messages, setMessages] = useState([]);
@@ -72,9 +72,6 @@ const Chat = () => {
               } else if (eventData.type === 'TEXT_MESSAGE_CONTENT') {
                 assistantMessage += eventData.delta;
                 setCurrentStreamingMessage(assistantMessage);
-              } else if (eventData.type === 'TEXT_MESSAGE_CHUNK') {
-                assistantMessage += eventData.delta;
-                setCurrentStreamingMessage(assistantMessage);
               } else if (eventData.type === 'TEXT_MESSAGE_END') {
                 setMessages(prev => [...prev, {
                   role: 'assistant',
@@ -91,7 +88,7 @@ const Chat = () => {
                 }]);
               }
             } catch (e) {
-              console.error('Parse error:', e, 'Line:', line);
+              console.error('Parse error:', e);
             }
           }
         }
@@ -191,7 +188,7 @@ const Chat = () => {
 };
 
 export default Chat;
-                      ############################################
+###########################################
 * {
   margin: 0;
   padding: 0;
@@ -423,7 +420,7 @@ function App() {
 }
 
 export default App;
-############################################################
+################################################
 import React from 'react';
 import ReactDOM from 'react-dom/client';
 import App from './App.jsx';
@@ -434,7 +431,7 @@ ReactDOM.createRoot(document.getElementById('root')).render(
     <App />
   </React.StrictMode>,
 );
-#########################################################
+##########################################################
 body {
   margin: 0;
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen',
@@ -448,7 +445,17 @@ body {
   height: 100vh;
   overflow: hidden;
 }
-#####################################
+##########################################################
+import { defineConfig } from 'vite'
+import react from '@vitejs/plugin-react'
+
+export default defineConfig({
+  plugins: [react()],
+  server: {
+    port: 5173,
+  }
+})
+##################################################################
 {
   "name": "flightops-frontend",
   "private": true,
@@ -457,8 +464,7 @@ body {
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "preview": "vite preview",
-    "lint": "eslint . --ext js,jsx --report-unused-disable-directives --max-warnings 0"
+    "preview": "vite preview"
   },
   "dependencies": {
     "react": "^18.3.1",
@@ -468,26 +474,7 @@ body {
     "@types/react": "^18.3.3",
     "@types/react-dom": "^18.3.0",
     "@vitejs/plugin-react": "^4.3.1",
-    "eslint": "^8.57.0",
-    "eslint-plugin-react": "^7.34.2",
-    "eslint-plugin-react-hooks": "^4.6.2",
-    "eslint-plugin-react-refresh": "^0.4.7",
     "vite": "^5.3.1"
   }
 }
-#############################################################
-import { defineConfig } from 'vite'
-import react from '@vitejs/plugin-react'
-
-export default defineConfig({
-  plugins: [react()],
-  server: {
-    port: 5173,
-    proxy: {
-      '/agent': {
-        target: 'http://localhost:8001',
-        changeOrigin: true,
-      }
-    }
-  }
-})
+                    
