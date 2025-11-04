@@ -1,3 +1,182 @@
+def plan_tools(self, user_query: str) -> dict:
+    """
+    Ask the LLM to produce a valid JSON plan for which MCP tools to call.
+    Handles text responses and code blocks.
+    """
+    from datetime import datetime
+    import re
+    
+    messages = [
+        {"role": "system", "content": SYSTEM_PROMPT_PLAN},
+        {"role": "user", "content": user_query},
+    ]
+
+    content = self._call_azure_openai(messages, temperature=0.0)  # Lower temperature
+    if not content:
+        logger.warning("⚠️ LLM returned empty response during plan generation.")
+        return {"plan": []}
+
+    # Clean the response
+    cleaned = content.strip()
+    
+    # Remove markdown code blocks
+    if "```json" in cleaned:
+        # Extract JSON from code block
+        match = re.search(r'```json\s*(\{.*?\})\s*```', cleaned, re.DOTALL)
+        if match:
+            cleaned = match.group(1)
+    elif "```" in cleaned:
+        # Remove any code block markers
+        cleaned = re.sub(r'```[a-z]*\n?', '', cleaned)
+        cleaned = cleaned.replace("```", "").strip()
+    
+    # Remove any text before the JSON
+    if cleaned.startswith("To ") or cleaned.startswith("I will"):
+        # Find the first { and extract from there
+        json_start = cleaned.find('{')
+        if json_start != -1:
+            cleaned = cleaned[json_start:]
+
+    logger.debug(f"🔍 Cleaned LLM plan output:\n{cleaned}")
+
+    # Try to parse JSON
+    try:
+        plan = json.loads(cleaned)
+        if isinstance(plan, dict) and "plan" in plan:
+            # Add default date if missing
+            for step in plan.get("plan", []):
+                args = step.get("arguments", {})
+                if "date_of_origin" in args and (args["date_of_origin"] is None or args["date_of_origin"] == "null"):
+                    args["date_of_origin"] = datetime.now().strftime("%Y-%m-%d")
+                    logger.info(f"Added default date: {args['date_of_origin']}")
+            return plan
+        else:
+            logger.warning("⚠️ LLM output did not contain 'plan' key.")
+            return {"plan": []}
+    except json.JSONDecodeError as e:
+        logger.warning(f"❌ Could not parse LLM plan output: {e}\n{cleaned[:300]}")
+        
+        # Fallback: Try to extract flight info and create a default plan
+        flight_match = re.search(r'6[Ee]\s*(\d+)', user_query)
+        if flight_match:
+            flight_num = flight_match.group(1)
+            logger.info(f"Creating fallback plan for flight 6E{flight_num}")
+            return {
+                "plan": [{
+                    "tool": "get_flight_basic_info",
+                    "arguments": {
+                        "carrier": "6E",
+                        "flight_number": flight_num,
+                        "date_of_origin": datetime.now().strftime("%Y-%m-%d")
+                    }
+                }]
+            }
+        
+        return {"plan": []}
+#####################################################################
+SYSTEM_PROMPT_PLAN = f"""
+You are an assistant that converts user questions into MCP tool calls.
+
+Available tools:
+{_build_tool_prompt()}
+
+### CRITICAL RULES:
+1. **ALWAYS return ONLY valid JSON** - no explanations, no text before or after
+2. **NEVER use null for date_of_origin** - use today's date: {datetime.now().strftime("%Y-%m-%d")}
+3. **Do NOT wrap JSON in code blocks** - return raw JSON only
+4. **Format**: {{"plan": [{{"tool": "tool_name", "arguments": {{...}}}}]}}
+
+### Tool selection logic
+
+1. **Use `run_aggregated_query`** for counts, totals, averages, etc.
+2. **Use `raw_mongodb_query`** for lists, filtered data
+3. **Use existing tools** (get_flight_basic_info, get_delay_summary, etc.) for single-flight queries
+
+### Example responses (COPY THIS FORMAT EXACTLY):
+
+User: "give me base station of flight 6E 215"
+{{
+  "plan": [
+    {{
+      "tool": "get_flight_basic_info",
+      "arguments": {{
+        "carrier": "6E",
+        "flight_number": "215",
+        "date_of_origin": "{datetime.now().strftime("%Y-%m-%d")}"
+      }}
+    }}
+  ]
+}}
+
+User: "delay info for 6E215"
+{{
+  "plan": [
+    {{
+      "tool": "get_delay_summary",
+      "arguments": {{
+        "carrier": "6E",
+        "flight_number": "215",
+        "date_of_origin": "{datetime.now().strftime("%Y-%m-%d")}"
+      }}
+    }}
+  ]
+}}
+
+REMEMBER: Return ONLY the JSON object, nothing else!
+"""
+###################################################################
+from datetime import datetime
+
+@mcp.tool()
+async def get_flight_basic_info(carrier: str = "", flight_number: str = "", date_of_origin: str = "") -> str:
+    """
+    Fetch basic flight information including carrier, flight number, date, stations, times, and status.
+    
+    Args:
+        carrier: Airline carrier code (e.g., "6E", "AI")
+        flight_number: Flight number as string (e.g., "215")
+        date_of_origin: Date in YYYY-MM-DD format (e.g., "2024-11-04"). Defaults to today.
+    """
+    # Use today's date if not provided
+    if not date_of_origin:
+        date_of_origin = datetime.now().strftime("%Y-%m-%d")
+        logger.info(f"Using default date: {date_of_origin}")
+    
+    logger.info(f"get_flight_basic_info: carrier={carrier}, flight_number={flight_number}, date={date_of_origin}")
+    
+    fn = normalize_flight_number(flight_number) if flight_number else None
+    dob = validate_date(date_of_origin) if date_of_origin else None
+    
+    if date_of_origin and not dob:
+        return response_error("Invalid date_of_origin format. Expected YYYY-MM-DD or common date formats", 400)
+    
+    query = make_query(carrier, fn, dob)
+    # ... rest of code
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 import os
 import json
 import logging
