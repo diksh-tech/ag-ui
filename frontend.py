@@ -637,3 +637,77 @@ const Chat = () => {
 };
 
 export default Chat;
+#############################################
+                      (venv11) PS C:\Users\Deeksha.x.Srivastava\OneDrive - InterGlobe Aviation Limited\Desktop\ag_ui_chatbot\backend> python ag_ui_server.py
+🚀 Starting FlightOps AG-UI Server...
+INFO:     Started server process [22276]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://0.0.0.0:8001 (Press CTRL+C to quit)
+INFO:     127.0.0.1:58781 - "OPTIONS /agent HTTP/1.1" 200 OK
+📥 Processing query: delay info for 6E215
+INFO:     127.0.0.1:58781 - "POST /agent HTTP/1.1" 200 OK
+INFO:FlightOps.MCPClient:Connecting to MCP server at http://127.0.0.1:8000/mcp
+INFO:httpx:HTTP Request: POST http://127.0.0.1:8000/mcp "HTTP/1.1 200 OK"
+INFO:mcp.client.streamable_http:Received session ID: dc5781ac56434708833eaf32665486e9
+INFO:mcp.client.streamable_http:Negotiated protocol version: 2025-06-18
+INFO:FlightOps.MCPClient:✅ Connected to MCP server successfully
+INFO:FlightOps.MCPClient:User query: delay info for 6E215
+INFO:httpx:HTTP Request: POST https://6e-openai-sandbox-aops.openai.azure.com/openai/deployments/gpt-4o/chat/completions?api-version=2024-12-01-preview "HTTP/1.1 200 OK"
+INFO:FlightOps.MCPClient:Calling tool: get_delay_summary with args: {'carrier': '6E', 'flight_number': '215'}
+INFO:httpx:HTTP Request: POST http://127.0.0.1:8000/mcp "HTTP/1.1 202 Accepted"
+INFO:httpx:HTTP Request: GET http://127.0.0.1:8000/mcp "HTTP/1.1 200 OK"
+INFO:httpx:HTTP Request: POST http://127.0.0.1:8000/mcp "HTTP/1.1 200 OK"
+INFO:httpx:HTTP Request: POST http://127.0.0.1:8000/mcp "HTTP/1.1 200 OK"
+INFO:httpx:HTTP Request: POST https://6e-openai-sandbox-aops.openai.azure.com/openai/deployments/gpt-4o/chat/completions?api-version=2024-12-01-preview "HTTP/1.1 200 OK"
+📥 Processing query: delay info for 6E215
+INFO:     127.0.0.1:59130 - "POST /agent HTTP/1.1" 200 OK
+INFO:FlightOps.MCPClient:User query: delay info for 6E215
+INFO:httpx:HTTP Request: POST https://6e-openai-sandbox-aops.openai.azure.com/openai/deployments/gpt-4o/chat/completions?api-version=2024-12-01-preview "HTTP/1.1 200 OK"
+INFO:FlightOps.MCPClient:Calling tool: get_delay_summary with args: {'carrier': '6E', 'flight_number': '215'}
+ERROR:FlightOps.MCPClient:Error invoking tool get_delay_summary:
+INFO:httpx:HTTP Request: POST https://6e-openai-sandbox-aops.openai.azure.com/openai/deployments/gpt-4o/chat/completions?api-version=2024-12-01-preview "HTTP/1.1 200 OK"
+📥 Processing query: what's status of flight 6E215
+INFO:     127.0.0.1:59199 - "POST /agent HTTP/1.1" 200 OK
+INFO:FlightOps.MCPClient:User query: what's status of flight 6E215
+INFO:httpx:HTTP Request: POST https://6e-openai-sandbox-aops.openai.azure.com/openai/deployments/gpt-4o/chat/completions?api-version=2024-12-01-preview "HTTP/1.1 200 OK"
+WARNING:FlightOps.MCPClient:❌ Could not parse LLM plan output after cleaning:
+To provide the status of flight 6E215, I need the date of origin for the flight. Could you please provide the date?
+📥 Processing query: what's status of flight 6E215
+INFO:     127.0.0.1:62426 - "POST /agent HTTP/1.1" 200 OK
+INFO:FlightOps.MCPClient:User query: what's status of flight 6E215
+INFO:httpx:HTTP Request: POST https://6e-openai-sandbox-aops.openai.azure.com/openai/deployments/gpt-4o/chat/completions?api-version=2024-12-01-preview "HTTP/1.1 200 OK"
+WARNING:FlightOps.MCPClient:❌ Could not parse LLM plan output after cleaning:
+To provide the status of flight 6E215, I need the date of origin for the flight. Could you please provide the date?
+📥 Processing query: what's status of flight 6E215
+INFO:     127.0.0.1:51161 - "POST /agent HTTP/1.1" 200 OK
+INFO:FlightOps.MCPClient:User query: what's status of flight 6E215
+INFO:httpx:HTTP Request: POST https://6e-openai-sandbox-aops.openai.azure.com/openai/deployments/gpt-4o/chat/completions?api-version=2024-12-01-preview "HTTP/1.1 200 OK"
+WARNING:FlightOps.MCPClient:❌ Could not parse LLM plan output after cleaning:
+To provide the status of flight 6E215, I need the date of origin for the flight. Could you please provide the date?
+📥 Processing query: what's status of flight 6E215
+INFO:     127.0.0.1:61221 - "POST /agent HTTP/1.1" 200 OK
+INFO:FlightOps.MCPClient:User query: what's status of flight 6E215
+INFO:httpx:HTTP Request: POST https://6e-openai-sandbox-aops.openai.azure.com/openai/deployments/gpt-4o/chat/completions?api-version=2024-12-01-preview "HTTP/1.1 200 OK"
+WARNING:FlightOps.MCPClient:❌ Could not parse LLM plan output after cleaning:
+To provide the status of flight 6E215, I need the date of origin for the flight. Could you please provide the date?
+📥 Processing query: what's status of flight 6E215
+INFO:     127.0.0.1:61890 - "POST /agent HTTP/1.1" 200 OK
+INFO:FlightOps.MCPClient:User query: what's status of flight 6E215
+INFO:httpx:HTTP Request: POST https://6e-openai-sandbox-aops.openai.azure.com/openai/deployments/gpt-4o/chat/completions?api-version=2024-12-01-preview "HTTP/1.1 200 OK"
+WARNING:FlightOps.MCPClient:❌ Could not parse LLM plan output after cleaning:
+To provide the status of flight 6E215, I need the date of origin for the flight. Could you please provide the date?
+📥 Processing query: give delay info about 6E 215
+INFO:     127.0.0.1:61203 - "POST /agent HTTP/1.1" 200 OK
+INFO:FlightOps.MCPClient:User query: give delay info about 6E 215
+INFO:httpx:HTTP Request: POST https://6e-openai-sandbox-aops.openai.azure.com/openai/deployments/gpt-4o/chat/completions?api-version=2024-12-01-preview "HTTP/1.1 200 OK"
+WARNING:FlightOps.MCPClient:❌ Could not parse LLM plan output after cleaning:
+To provide delay information for flight 6E 215, I need the date of origin for the flight. Could you please provide the date?
+INFO:     127.0.0.1:64665 - "OPTIONS /agent HTTP/1.1" 200 OK
+📥 Processing query: give delay info about 6E 215
+INFO:     127.0.0.1:64665 - "POST /agent HTTP/1.1" 200 OK
+INFO:FlightOps.MCPClient:User query: give delay info about 6E 215
+INFO:httpx:HTTP Request: POST https://6e-openai-sandbox-aops.openai.azure.com/openai/deployments/gpt-4o/chat/completions?api-version=2024-12-01-preview "HTTP/1.1 200 OK"
+WARNING:FlightOps.MCPClient:❌ Could not parse LLM plan output after cleaning:
+To provide delay information for flight 6E 215, I need the date of origin. Could you please specify the date?
+
